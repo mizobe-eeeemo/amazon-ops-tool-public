@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import streamlit as st
+
+from lib.claude_client import complete
+from lib.db import add_chat_message, get_chat_messages
+from lib.prompts import INTERNAL_KNOWLEDGE, QA_SYSTEM_PROMPT
+from lib.ui import require_workspace
+
+
+client = require_workspace("Q&Aチャット")
+
+st.title("Q&Aチャット")
+st.caption("クライアント別に履歴が残る運用相談スレッドです。")
+
+messages = get_chat_messages(client["id"], limit=30)
+for message in messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+        if message.get("source_context"):
+            st.caption(message["source_context"])
+
+
+def needs_seller_data(question: str) -> bool:
+    keywords = ["売上", "広告", "ACOS", "CVR", "CTR", "インプレッション", "クリック", "期間", "先週", "今月", "先月"]
+    return any(keyword.lower() in question.lower() for keyword in keywords)
+
+
+def build_prompt(question: str, history: list[dict]) -> str:
+    recent = "\n".join(f"{item['role']}: {item['content']}" for item in history[-12:])
+    data_note = (
+        "この質問はSeller Centralデータ確認が必要そうです。V1現段階では自動取得未接続のため、必要データを明示してください。"
+        if needs_seller_data(question)
+        else "この質問は履歴と社内ナレッジ中心で回答できます。"
+    )
+    return f"""
+【クライアント】
+{client['name']}
+
+【社内ナレッジ】
+{INTERNAL_KNOWLEDGE}
+
+【直近履歴】
+{recent or "なし"}
+
+【データ取得判定】
+{data_note}
+
+【今回の質問】
+{question}
+"""
+
+
+def fallback_answer(question: str) -> str:
+    if needs_seller_data(question):
+        return (
+            "この内容はSeller Centralの実績確認が必要です。V1の現段階では自動取得をまだ接続していないため、"
+            "対象期間、売上、広告費、ACOS、クリック数、CVRが分かるCSVを確認できると分析できます。"
+            "まずは期間と見たい指標を指定してください。"
+        )
+    return (
+        "履歴に残しました。APIキー設定後はClaudeが文脈を踏まえて回答します。"
+        "現時点のデモ回答としては、結論、根拠、次の確認事項の3点に分けて整理するのがよいです。"
+    )
+
+
+question = st.chat_input("質問を入力")
+if question:
+    add_chat_message(client["id"], "user", question)
+    prompt = build_prompt(question, messages)
+    result = complete(prompt, system=QA_SYSTEM_PROMPT, max_tokens=1400)
+    answer = result.text or fallback_answer(question)
+    source_context = "Claude APIで回答" if result.used_api else "デモ回答 / Seller Central自動取得は未接続"
+    add_chat_message(client["id"], "assistant", answer, source_context=source_context)
+    st.rerun()
+
