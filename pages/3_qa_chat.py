@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+
 import streamlit as st
 
-from lib.browser_use_client import get_browser_use_config
+from lib.browser_use_client import BrowserUseRunResult, get_browser_use_config, run_seller_central_metrics_fetch
 from lib.claude_client import complete
 from lib.db import add_chat_message, get_chat_messages
 from lib.prompts import INTERNAL_KNOWLEDGE, QA_SYSTEM_PROMPT
@@ -14,6 +16,14 @@ client = require_workspace("Q&Aチャット")
 
 st.title("Q&Aチャット")
 st.caption("クライアント別に履歴が残る運用相談スレッドです。")
+
+seller_fetch_enabled = st.toggle(
+    "Seller Central実データ取得を試す",
+    value=False,
+    help="オンにすると、広告費などの質問でbrowser-useを起動します。APIクレジットを使用します。",
+)
+if seller_fetch_enabled:
+    st.warning("browser-useを起動します。ログイン、2FA、課金確認、変更確認が必要な画面では取得を止める指示を入れています。")
 
 messages = get_chat_messages(client["id"], limit=30)
 for message in messages:
@@ -39,16 +49,23 @@ def profile_available_for_account(account_key: str | None) -> bool:
     return False
 
 
-def build_prompt(question: str, history: list[dict]) -> str:
+def seller_data_context(fetch_result: BrowserUseRunResult | None) -> str:
+    if fetch_result is None:
+        return "未実行"
+    return fetch_result.prompt_context()
+
+
+def build_prompt(question: str, history: list[dict], fetch_result: BrowserUseRunResult | None = None) -> str:
     recent = "\n".join(f"{item['role']}: {item['content']}" for item in history[-12:])
     account_key = client.get("seller_account_key") or ""
     shop_name = client.get("shop_name") or "未設定"
     browser_profile_status = "設定済み" if profile_available_for_account(account_key) else "未設定"
-    data_note = (
-        "この質問はSeller Centralデータ確認が必要そうです。V1現段階では自動取得の実行前に、対象ショップと使用アカウントを確認してください。"
-        if needs_seller_data(question)
-        else "この質問は履歴と社内ナレッジ中心で回答できます。"
-    )
+    if needs_seller_data(question) and fetch_result:
+        data_note = "この質問はSeller Centralデータ確認が必要そうです。下の自動取得結果を優先して、取れた値・取れなかった値を明確に分けて回答してください。"
+    elif needs_seller_data(question):
+        data_note = "この質問はSeller Centralデータ確認が必要そうです。自動取得結果が未実行の場合は、対象ショップと使用アカウントを確認し、必要な指標を案内してください。"
+    else:
+        data_note = "この質問は履歴と社内ナレッジ中心で回答できます。"
     return f"""
 【クライアント】
 {client['name']}
@@ -66,6 +83,9 @@ browser-useプロフィール: {browser_profile_status}
 
 【データ取得判定】
 {data_note}
+
+【Seller Central自動取得結果】
+{seller_data_context(fetch_result)}
 
 【今回の質問】
 {question}
@@ -85,33 +105,66 @@ def fallback_answer(question: str) -> str:
     )
 
 
-def seller_central_check_block() -> str:
+def fetch_status_label(fetch_result: BrowserUseRunResult | None) -> str:
+    if fetch_result is None:
+        return "未実行（実データ取得スイッチがオフ）"
+    if fetch_result.status == "stopped":
+        return "完了"
+    if fetch_result.status == "timed_out":
+        return "時間切れ"
+    if fetch_result.status in {"running", "created", "idle"}:
+        return "実行中"
+    if fetch_result.status == "unavailable":
+        return "未実行"
+    if fetch_result.status == "error":
+        return "エラー"
+    return fetch_result.status
+
+
+def seller_central_check_block(fetch_result: BrowserUseRunResult | None = None) -> str:
     account_key = client.get("seller_account_key") or ""
     shop_name = client.get("shop_name") or "未設定"
     profile_status = "設定済み" if profile_available_for_account(account_key) else "未設定"
-    return (
+    lines = [
         "## Seller Central連携確認\n\n"
         f"- 対象ショップ名: {shop_name}\n"
         f"- 使用Seller Central: {seller_account_label(account_key)}\n"
         f"- browser-useプロフィール: {profile_status}\n"
-        "- 自動取得ステータス: 実行前（次の実装でSeller Central取得を接続）"
-    )
+        f"- 自動取得ステータス: {fetch_status_label(fetch_result)}"
+    ]
+    if fetch_result:
+        if fetch_result.summary:
+            lines.append(f"- 取得メモ: {fetch_result.summary}")
+        if fetch_result.total_cost_usd:
+            lines.append(f"- browser-use推定コスト: ${fetch_result.total_cost_usd}")
+        if fetch_result.live_url:
+            lines.append(f"- 実行画面: {fetch_result.live_url}")
+    return "\n".join(lines)
+
+
+def source_context_for(result_used_api: bool, fetch_result: BrowserUseRunResult | None) -> str:
+    parts = ["Claude APIで回答" if result_used_api else "デモ回答"]
+    if fetch_result:
+        parts.append(f"browser-use: {fetch_status_label(fetch_result)}")
+    elif seller_fetch_enabled:
+        parts.append("browser-use: 未実行")
+    return " / ".join(parts)
 
 
 question = st.chat_input("質問を入力")
 if question:
     add_chat_message(client["id"], "user", question)
-    prompt = build_prompt(question, messages)
+    fetch_result = None
+    if needs_seller_data(question) and seller_fetch_enabled:
+        with st.spinner("browser-useでSeller Centralを確認しています。ログインや2FAが必要になった場合は取得を止めます。"):
+            fetch_result = run_seller_central_metrics_fetch(client, question)
+    prompt = build_prompt(question, messages, fetch_result)
     result = complete(prompt, system=QA_SYSTEM_PROMPT, max_tokens=1400)
     answer = result.text or fallback_answer(question)
     if needs_seller_data(question):
-        answer = f"{seller_central_check_block()}\n\n---\n\n{answer}"
-    source_context = (
-        "Claude APIで回答 / Seller Central連携確認済み"
-        if result.used_api and needs_seller_data(question)
-        else "Claude APIで回答"
-        if result.used_api
-        else "デモ回答 / Seller Central自動取得は未接続"
-    )
+        if fetch_result and fetch_result.output:
+            answer = f"{answer}\n\n---\n\n### browser-use取得結果\n\n```json\n{json.dumps(fetch_result.output, ensure_ascii=False, indent=2)}\n```"
+        answer = f"{seller_central_check_block(fetch_result)}\n\n---\n\n{answer}"
+    source_context = source_context_for(result.used_api, fetch_result)
     add_chat_message(client["id"], "assistant", answer, source_context=source_context)
     st.rerun()
