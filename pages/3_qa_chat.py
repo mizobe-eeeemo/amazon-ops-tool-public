@@ -54,15 +54,18 @@ with st.expander("browser-useセッション状態を確認"):
             if inspect_result.error:
                 st.caption(inspect_result.error)
         else:
-            st.write(
+            st.json(
                 {
                     "status": inspect_result.status,
                     "is_success": inspect_result.is_success,
                     "last_step": inspect_result.last_step_summary,
                     "cost": inspect_result.total_cost_usd,
-                    "screenshot_url": inspect_result.screenshot_url,
+                    "screenshot": "取得あり" if inspect_result.screenshot_url else "なし",
                 }
             )
+            if inspect_result.screenshot_url:
+                st.link_button("最終スクリーンショットを開く", inspect_result.screenshot_url)
+                st.image(inspect_result.screenshot_url, caption="browser-useの最終画面")
 
 messages = get_chat_messages(client["id"], limit=30)
 for message in messages:
@@ -188,7 +191,7 @@ def seller_central_check_block(fetch_result: BrowserUseRunResult | None = None) 
         if fetch_result.live_url:
             lines.append(f"- 実行画面: {fetch_result.live_url}")
         if fetch_result.screenshot_url:
-            lines.append(f"- 最終スクリーンショット: {fetch_result.screenshot_url}")
+            lines.append("- 最終スクリーンショット: 取得あり（Q&A画面のセッション状態確認から開けます）")
     return "\n".join(lines)
 
 
