@@ -363,10 +363,12 @@ Task:
 2. If that redirects or fails, try https://advertising.amazon.co.jp/cm/campaigns, then https://advertising.amazon.co.jp/
 3. Confirm that the active advertiser/store/account matches "{shop_name}" or visibly shows "{shop_name}". If a selector is visible and an exact or very close match exists, choose it.
 4. Set the requested date range. For "先月", use the absolute date instruction above. Do not search for the text "今日"; do not spend more than two attempts on the date picker.
-5. Read only visible performance numbers from the campaign manager dashboard, KPI summary, or campaign table totals. Do not download reports and do not change any ads.
-6. Prefer these metrics when visible: advertising spend, ad sales, ACOS, impressions, and clicks.
-7. If the date range or metrics cannot be read after reaching the advertising screen, return status "partial" or "blocked" with current_url, visible_screen, and blocked_by. Do not keep waiting.
-8. Return only the requested structured result. Use null for metrics that are not visible.
+5. Read only numbers that are visible near the top of the campaign manager page, such as KPI cards, summary totals, or the currently visible top of the campaign table. Do not scroll to the bottom of the page and do not search the whole page for metrics.
+6. If the requested metrics are not visible near the top after the date range is set, return status "blocked" with blocked_by "metrics_not_visible_without_scroll", plus current_url and visible_screen. Do not keep scrolling.
+7. Prefer these metrics when visible: advertising spend, ad sales, ACOS, impressions, and clicks.
+8. If only some metrics are visible, return status "partial" and include those values. Use null for missing metrics.
+9. If the date range or metrics cannot be read after reaching the advertising screen, return status "partial" or "blocked" with current_url, visible_screen, and blocked_by. Do not keep waiting.
+10. Return only the requested structured result. Use null for metrics that are not visible.
 """
 
 
