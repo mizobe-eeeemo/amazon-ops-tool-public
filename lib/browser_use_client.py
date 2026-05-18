@@ -261,6 +261,55 @@ def _output_has_result(output: Any) -> bool:
     return _output_status(output).lower() in {"success", "partial", "blocked"}
 
 
+def _metric_number(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = (
+            value.replace(",", "")
+            .replace("¥", "")
+            .replace("￥", "")
+            .replace("%", "")
+            .strip()
+        )
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _enrich_estimated_metrics(output: Any) -> Any:
+    if not isinstance(output, dict):
+        return output
+    metrics = output.get("metrics")
+    if not isinstance(metrics, dict):
+        return output
+
+    clicks = _metric_number(metrics.get("clicks"))
+    cpc = _metric_number(metrics.get("cpc"))
+    ad_sales = _metric_number(metrics.get("ad_sales"))
+    ad_spend = _metric_number(metrics.get("ad_spend"))
+    estimated: dict[str, float] = {}
+
+    if ad_spend is None and clicks is not None and cpc is not None:
+        estimated_ad_spend = round(clicks * cpc)
+        estimated["ad_spend_from_clicks_cpc"] = estimated_ad_spend
+        if ad_sales and ad_sales > 0:
+            estimated["acos_from_estimated_spend"] = round(estimated_ad_spend / ad_sales * 100, 2)
+
+    if estimated:
+        output["estimated_metrics"] = estimated
+        notes = output.get("notes")
+        if not isinstance(notes, list):
+            notes = []
+        notes.append(
+            "広告費は画面上で未取得です。estimated_metricsはクリック数×CPCから計算した概算で、実広告費ではありません。"
+        )
+        output["notes"] = notes
+    return output
+
+
 SELLER_CENTRAL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -418,6 +467,7 @@ def _result_from_session(session: dict[str, Any], summary: str | None = None) ->
             output = json.loads(output)
         except json.JSONDecodeError:
             pass
+    output = _enrich_estimated_metrics(output)
     output_summary = _output_summary(output)
     if not output_summary:
         output_summary = summary or str(session.get("lastStepSummary") or "")

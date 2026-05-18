@@ -113,7 +113,10 @@ def build_prompt(question: str, history: list[dict], fetch_result: BrowserUseRun
     shop_name = client.get("shop_name") or "未設定"
     browser_profile_status = "設定済み" if profile_available_for_account(account_key) else "未設定"
     if needs_seller_data(question) and fetch_result:
-        data_note = "この質問はSeller Centralデータ確認が必要そうです。下の自動取得結果を優先して、取れた値・取れなかった値を明確に分けて回答してください。"
+        data_note = (
+            "この質問はSeller Centralデータ確認が必要そうです。下の自動取得結果を優先して、取れた値・取れなかった値を明確に分けて回答してください。"
+            "estimated_metricsがある場合は、必ず「概算」と明記し、実広告費として扱わないでください。"
+        )
     elif needs_seller_data(question):
         data_note = "この質問はSeller Centralデータ確認が必要そうです。自動取得結果が未実行の場合は、対象ショップと使用アカウントを確認し、必要な指標を案内してください。"
     else:
