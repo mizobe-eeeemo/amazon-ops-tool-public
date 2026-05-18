@@ -8,7 +8,7 @@ from lib.auth import get_secret, using_local_default_password
 from lib.browser_use_client import get_browser_use_config
 from lib.claude_client import claude_available, get_model
 from lib.db import create_or_update_client, get_clients
-from lib.seller_central_mapping import infer_seller_account, seller_account_label
+from lib.seller_central_mapping import infer_seller_account, parse_client_mapping_csv, seller_account_label
 from lib.settings import DB_PATH, DOCS_DIR, OUTPUT_DIR, ROOT_DIR
 from lib.ui import require_workspace
 
@@ -85,6 +85,32 @@ if clients:
     st.dataframe(rows, use_container_width=True, hide_index=True)
 else:
     st.info("クライアントはまだ登録されていません。")
+
+st.markdown("**CSV一括取り込み**")
+st.caption("初回登録用です。GoogleスプレッドシートをCSVでダウンロードし、C列=会社名、D列=ショップ名、BL列=Seller CentralログインIDとして取り込みます。")
+uploaded_csv = st.file_uploader("クライアント一覧CSV", type=["csv"])
+has_header = st.checkbox("1行目は見出しとして扱う", value=True)
+if uploaded_csv is not None:
+    if st.button("CSVを取り込む", type="primary"):
+        csv_text = uploaded_csv.getvalue().decode("utf-8-sig")
+        parsed_clients, warnings = parse_client_mapping_csv(csv_text, has_header=has_header)
+        for item in parsed_clients:
+            create_or_update_client(
+                name=item["company_name"],
+                shop_name=item["shop_name"],
+                seller_login_id=item["seller_login_id"],
+                seller_account_key=item["seller_account_key"],
+                marketplace="Amazon.co.jp",
+                memo="CSV一括取り込み",
+            )
+        st.success(f"{len(parsed_clients)}件を追加 / 更新しました。")
+        if warnings:
+            with st.expander(f"スキップした行: {len(warnings)}件"):
+                for warning in warnings[:100]:
+                    st.write(warning)
+                if len(warnings) > 100:
+                    st.write("表示は100件までです。CSVの内容を確認してください。")
+        st.rerun()
 
 with st.form("client_seller_mapping_form"):
     st.markdown("**クライアントを追加 / 更新**")
