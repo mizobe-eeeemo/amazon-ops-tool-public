@@ -57,6 +57,11 @@ else:
     st.info("BROWSER_USE_API_KEY は未設定です。Seller Central自動取得はまだ動きません。")
 
 if browser_use_config.seller_central_profile_id:
-    st.success("Seller Central用のbrowser-useプロファイルIDは設定されています。")
+    st.success("Seller CentralアカウントA用のbrowser-useプロファイルIDは設定されています。")
 else:
-    st.info("BROWSER_USE_PROFILE_ID_SELLER_CENTRAL は未設定です。2FA確認後に追加します。")
+    st.info("BROWSER_USE_PROFILE_ID_SELLER_CENTRAL は未設定です。アカウントAの2FA確認後に追加します。")
+
+if browser_use_config.seller_central_profile_id_b:
+    st.success("Seller CentralアカウントB用のbrowser-useプロファイルIDは設定されています。")
+else:
+    st.info("BROWSER_USE_PROFILE_ID_SELLER_CENTRAL_B は未設定です。アカウントBの2FA確認後に追加します。")
