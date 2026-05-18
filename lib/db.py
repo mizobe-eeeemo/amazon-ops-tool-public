@@ -40,6 +40,9 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS clients (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
+                shop_name TEXT DEFAULT '',
+                seller_login_id TEXT DEFAULT '',
+                seller_account_key TEXT DEFAULT '',
                 marketplace TEXT NOT NULL,
                 memo TEXT DEFAULT '',
                 created_at TEXT NOT NULL
@@ -90,7 +93,20 @@ def init_db() -> None:
             );
             """
         )
+        ensure_client_columns(conn)
     seed_clients()
+
+
+def ensure_client_columns(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(clients)").fetchall()}
+    columns = {
+        "shop_name": "TEXT DEFAULT ''",
+        "seller_login_id": "TEXT DEFAULT ''",
+        "seller_account_key": "TEXT DEFAULT ''",
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE clients ADD COLUMN {name} {definition}")
 
 
 def seed_clients() -> None:
@@ -127,6 +143,57 @@ def create_client(name: str, marketplace: str, memo: str = "") -> int:
             (name, marketplace, memo, utc_now()),
         )
     return int(cursor.lastrowid)
+
+
+def create_or_update_client(
+    name: str,
+    marketplace: str,
+    memo: str = "",
+    shop_name: str = "",
+    seller_login_id: str = "",
+    seller_account_key: str = "",
+) -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT id FROM clients WHERE name = ?", (name,)).fetchone()
+        if row:
+            conn.execute(
+                """
+                UPDATE clients
+                SET marketplace = ?, memo = ?, shop_name = ?,
+                    seller_login_id = ?, seller_account_key = ?
+                WHERE id = ?
+                """,
+                (marketplace, memo, shop_name, seller_login_id, seller_account_key, row["id"]),
+            )
+            return int(row["id"])
+        cursor = conn.execute(
+            """
+            INSERT INTO clients
+                (name, shop_name, seller_login_id, seller_account_key, marketplace, memo, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (name, shop_name, seller_login_id, seller_account_key, marketplace, memo, utc_now()),
+        )
+    return int(cursor.lastrowid)
+
+
+def update_client_seller_mapping(
+    client_id: int,
+    shop_name: str,
+    seller_login_id: str,
+    seller_account_key: str,
+    memo: str = "",
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE clients
+            SET shop_name = ?, seller_login_id = ?, seller_account_key = ?,
+                memo = CASE WHEN ? = '' THEN memo ELSE ? END
+            WHERE id = ?
+            """,
+            (shop_name, seller_login_id, seller_account_key, memo, memo, client_id),
+        )
 
 
 def log_activity(client_id: int, feature: str, action: str, detail: str = "") -> None:
@@ -299,4 +366,3 @@ def export_path(filename: str) -> Path:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     return OUTPUT_DIR / filename
-

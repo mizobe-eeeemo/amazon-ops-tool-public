@@ -7,6 +7,8 @@ import streamlit as st
 from lib.auth import get_secret, using_local_default_password
 from lib.browser_use_client import get_browser_use_config
 from lib.claude_client import claude_available, get_model
+from lib.db import create_or_update_client, get_clients
+from lib.seller_central_mapping import infer_seller_account, seller_account_label
 from lib.settings import DB_PATH, DOCS_DIR, OUTPUT_DIR, ROOT_DIR
 from lib.ui import require_workspace
 
@@ -65,3 +67,50 @@ if browser_use_config.seller_central_profile_id_b:
     st.success("Seller CentralアカウントB用のbrowser-useプロファイルIDは設定されています。")
 else:
     st.info("BROWSER_USE_PROFILE_ID_SELLER_CENTRAL_B は未設定です。アカウントBの2FA確認後に追加します。")
+
+st.subheader("クライアント連携設定")
+st.caption("スプレッドシートのC列を会社名、B列をSeller Central上のショップ名として登録します。")
+
+clients = get_clients()
+if clients:
+    rows = [
+        {
+            "会社名": client["name"],
+            "ショップ名": client.get("shop_name") or "",
+            "Seller Central": seller_account_label(client.get("seller_account_key")),
+            "ログインID": client.get("seller_login_id") or "",
+        }
+        for client in clients
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+else:
+    st.info("クライアントはまだ登録されていません。")
+
+with st.form("client_seller_mapping_form"):
+    st.markdown("**クライアントを追加 / 更新**")
+    company_name = st.text_input("会社名（スプレッドシートC列）")
+    shop_name = st.text_input("ショップ名（スプレッドシートB列 / Seller Centralで選択する名前）")
+    seller_login_id = st.text_input("Seller CentralログインID（スプレッドシートBL列）")
+    memo = st.text_area("メモ", height=80)
+    submitted = st.form_submit_button("保存")
+
+if submitted:
+    inferred_account = infer_seller_account(seller_login_id)
+    if not company_name.strip():
+        st.error("会社名を入力してください。")
+    elif not shop_name.strip():
+        st.error("ショップ名を入力してください。")
+    elif not inferred_account:
+        st.error("Seller CentralログインIDは amazon_consulting@eeeemo.co.jp または ac02@eeeemo.co.jp を入力してください。")
+    else:
+        client_id = create_or_update_client(
+            name=company_name.strip(),
+            shop_name=shop_name.strip(),
+            seller_login_id=seller_login_id.strip(),
+            seller_account_key=inferred_account,
+            marketplace="Amazon.co.jp",
+            memo=memo.strip(),
+        )
+        st.session_state["selected_client_id"] = client_id
+        st.success(f"{company_name.strip()} をSeller Central{seller_account_label(inferred_account)}に紐づけました。")
+        st.rerun()
