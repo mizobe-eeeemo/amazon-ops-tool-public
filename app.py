@@ -57,7 +57,7 @@ with right:
     st.subheader("クライアント追加")
     with st.form("create_client_form"):
         name = st.text_input("会社名（スプレッドシートC列）")
-        shop_name = st.text_input("ショップ名（スプレッドシートB列）")
+        shop_name = st.text_input("ショップ名（スプレッドシートD列）")
         seller_login_id = st.text_input("Seller CentralログインID（スプレッドシートBL列）")
         marketplace = st.text_input("マーケットプレイス", value="Amazon.co.jp")
         memo = st.text_area("メモ", height=90)

@@ -69,7 +69,7 @@ else:
     st.info("BROWSER_USE_PROFILE_ID_SELLER_CENTRAL_B は未設定です。アカウントBの2FA確認後に追加します。")
 
 st.subheader("クライアント連携設定")
-st.caption("スプレッドシートのC列を会社名、B列をSeller Central上のショップ名として登録します。")
+st.caption("スプレッドシートのC列を会社名、D列をSeller Central上のショップ名として登録します。")
 
 clients = get_clients()
 if clients:
@@ -89,7 +89,7 @@ else:
 with st.form("client_seller_mapping_form"):
     st.markdown("**クライアントを追加 / 更新**")
     company_name = st.text_input("会社名（スプレッドシートC列）")
-    shop_name = st.text_input("ショップ名（スプレッドシートB列 / Seller Centralで選択する名前）")
+    shop_name = st.text_input("ショップ名（スプレッドシートD列 / Seller Centralで選択する名前）")
     seller_login_id = st.text_input("Seller CentralログインID（スプレッドシートBL列）")
     memo = st.text_area("メモ", height=80)
     submitted = st.form_submit_button("保存")
