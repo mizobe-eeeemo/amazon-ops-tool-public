@@ -47,3 +47,14 @@ def seller_central_profile_available() -> bool:
 def seller_central_profile_b_available() -> bool:
     config = get_browser_use_config()
     return config.api_key_configured and bool(config.seller_central_profile_id_b)
+
+
+def profile_available_for_account(account_key: str | None) -> bool:
+    config = get_browser_use_config()
+    if not config.api_key_configured:
+        return False
+    if account_key == "A":
+        return bool(config.seller_central_profile_id)
+    if account_key == "B":
+        return bool(config.seller_central_profile_id_b)
+    return False

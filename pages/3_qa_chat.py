@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import streamlit as st
 
+from lib.browser_use_client import profile_available_for_account
 from lib.claude_client import complete
 from lib.db import add_chat_message, get_chat_messages
 from lib.prompts import INTERNAL_KNOWLEDGE, QA_SYSTEM_PROMPT
+from lib.seller_central_mapping import seller_account_label
 from lib.ui import require_workspace
 
 
@@ -28,14 +30,22 @@ def needs_seller_data(question: str) -> bool:
 
 def build_prompt(question: str, history: list[dict]) -> str:
     recent = "\n".join(f"{item['role']}: {item['content']}" for item in history[-12:])
+    account_key = client.get("seller_account_key") or ""
+    shop_name = client.get("shop_name") or "未設定"
+    browser_profile_status = "設定済み" if profile_available_for_account(account_key) else "未設定"
     data_note = (
-        "この質問はSeller Centralデータ確認が必要そうです。V1現段階では自動取得未接続のため、必要データを明示してください。"
+        "この質問はSeller Centralデータ確認が必要そうです。V1現段階では自動取得の実行前に、対象ショップと使用アカウントを確認してください。"
         if needs_seller_data(question)
         else "この質問は履歴と社内ナレッジ中心で回答できます。"
     )
     return f"""
 【クライアント】
 {client['name']}
+
+【Seller Central連携設定】
+対象ショップ名: {shop_name}
+使用Seller Central: {seller_account_label(account_key)}
+browser-useプロフィール: {browser_profile_status}
 
 【社内ナレッジ】
 {INTERNAL_KNOWLEDGE}
@@ -64,13 +74,33 @@ def fallback_answer(question: str) -> str:
     )
 
 
+def seller_central_check_block() -> str:
+    account_key = client.get("seller_account_key") or ""
+    shop_name = client.get("shop_name") or "未設定"
+    profile_status = "設定済み" if profile_available_for_account(account_key) else "未設定"
+    return (
+        "## Seller Central連携確認\n\n"
+        f"- 対象ショップ名: {shop_name}\n"
+        f"- 使用Seller Central: {seller_account_label(account_key)}\n"
+        f"- browser-useプロフィール: {profile_status}\n"
+        "- 自動取得ステータス: 実行前（次の実装でSeller Central取得を接続）"
+    )
+
+
 question = st.chat_input("質問を入力")
 if question:
     add_chat_message(client["id"], "user", question)
     prompt = build_prompt(question, messages)
     result = complete(prompt, system=QA_SYSTEM_PROMPT, max_tokens=1400)
     answer = result.text or fallback_answer(question)
-    source_context = "Claude APIで回答" if result.used_api else "デモ回答 / Seller Central自動取得は未接続"
+    if needs_seller_data(question):
+        answer = f"{seller_central_check_block()}\n\n---\n\n{answer}"
+    source_context = (
+        "Claude APIで回答 / Seller Central連携確認済み"
+        if result.used_api and needs_seller_data(question)
+        else "Claude APIで回答"
+        if result.used_api
+        else "デモ回答 / Seller Central自動取得は未接続"
+    )
     add_chat_message(client["id"], "assistant", answer, source_context=source_context)
     st.rerun()
-
