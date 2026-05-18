@@ -4,7 +4,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -144,6 +144,27 @@ def _normalize_v3_model(model: str) -> str:
     return mapping.get(model, model)
 
 
+def _last_completed_month_range(today: datetime) -> tuple[str, str]:
+    first_this_month = today.date().replace(day=1)
+    last_month_end = first_this_month - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+    return last_month_start.isoformat(), last_month_end.isoformat()
+
+
+def _date_range_instruction(question: str, today: datetime) -> str:
+    if "先月" in question:
+        start_date, end_date = _last_completed_month_range(today)
+        return (
+            f'The user asked for "先月". Use the absolute date range {start_date} through {end_date} '
+            'in Japan time. Do not search the page for the word "今日". Use the date range control, '
+            'choose a "Last month" / "先月" preset if it exists, or enter/select these exact start and end dates.'
+        )
+    return (
+        "Use the date range implied by the user question. If the period is ambiguous, report which current "
+        "date range is visible instead of repeatedly trying to change the filter."
+    )
+
+
 def _browser_use_request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     api_key = _get_api_key()
     if not api_key:
@@ -236,6 +257,10 @@ def _output_is_success(output: Any) -> bool:
     return _output_status(output).lower() == "success"
 
 
+def _output_has_result(output: Any) -> bool:
+    return _output_status(output).lower() in {"success", "partial", "blocked"}
+
+
 SELLER_CENTRAL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -247,6 +272,9 @@ SELLER_CENTRAL_OUTPUT_SCHEMA: dict[str, Any] = {
         "shop_name": {"type": ["string", "null"]},
         "period": {"type": ["string", "null"]},
         "currency": {"type": ["string", "null"]},
+        "current_url": {"type": ["string", "null"]},
+        "visible_screen": {"type": ["string", "null"]},
+        "blocked_by": {"type": ["string", "null"]},
         "metrics": {
             "type": "object",
             "properties": {
@@ -305,7 +333,9 @@ SELLER_CENTRAL_ACCESS_CHECK_SCHEMA: dict[str, Any] = {
 
 
 def _build_seller_central_task(client: dict[str, Any], question: str) -> str:
-    today = datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
+    now = datetime.now(ZoneInfo("Asia/Tokyo"))
+    today = now.date().isoformat()
+    date_range_instruction = _date_range_instruction(question, now)
     company_name = client.get("name") or ""
     shop_name = client.get("shop_name") or ""
     marketplace = client.get("marketplace") or "Amazon.co.jp"
@@ -326,13 +356,17 @@ Client:
 - Marketplace: {marketplace}
 - Today in Japan: {today}
 - User question: {question}
+- Date instruction: {date_range_instruction}
 
 Task:
-1. Open Amazon Seller Central Japan. Use https://sellercentral.amazon.co.jp/ as the starting point.
-2. Confirm that the active seller/store matches the shop/store name above. If there is an account/store selector and an exact or very close match exists, choose it.
-3. Find the advertising performance data needed for the user question. If the question says "先月", use the last completed calendar month relative to Today in Japan. If the exact period cannot be selected, use the closest available period and explain it in notes.
-4. Prefer these metrics when visible: advertising spend, ad sales, ACOS, ROAS, impressions, clicks, CTR, CPC, orders, and CVR.
-5. Return only the requested structured result. Use null for metrics that are not visible.
+1. Open the Amazon Ads campaign manager directly: https://advertising.amazon.co.jp/campaign-manager
+2. If that redirects or fails, try https://advertising.amazon.co.jp/cm/campaigns, then https://advertising.amazon.co.jp/
+3. Confirm that the active advertiser/store/account matches "{shop_name}" or visibly shows "{shop_name}". If a selector is visible and an exact or very close match exists, choose it.
+4. Set the requested date range. For "先月", use the absolute date instruction above. Do not search for the text "今日"; do not spend more than two attempts on the date picker.
+5. Read only visible performance numbers from the campaign manager dashboard, KPI summary, or campaign table totals. Do not download reports and do not change any ads.
+6. Prefer these metrics when visible: advertising spend, ad sales, ACOS, impressions, and clicks.
+7. If the date range or metrics cannot be read after reaching the advertising screen, return status "partial" or "blocked" with current_url, visible_screen, and blocked_by. Do not keep waiting.
+8. Return only the requested structured result. Use null for metrics that are not visible.
 """
 
 
@@ -432,7 +466,7 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
         "task": _build_seller_central_task(client, question),
         "model": _normalize_v3_model(config.default_model),
         "keepAlive": False,
-        "maxCostUsd": config.max_cost_usd,
+        "maxCostUsd": _secret_or_env("BROWSER_USE_METRICS_MAX_COST_USD", "0.35") or "0.35",
         "profileId": profile_id,
         "proxyCountryCode": config.proxy_country_code,
         "outputSchema": SELLER_CENTRAL_OUTPUT_SCHEMA,
@@ -456,31 +490,33 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
             )
 
         final_statuses = {"stopped", "timed_out", "error"}
-        deadline = time.monotonic() + config.poll_timeout_seconds
+        deadline = time.monotonic() + max(config.poll_timeout_seconds, 150)
         while str(session.get("status") or "") not in final_statuses and time.monotonic() < deadline:
             time.sleep(4)
             session = _browser_use_request("GET", f"/api/v3/sessions/{session_id}")
 
         if str(session.get("status") or "") not in final_statuses:
+            latest = get_browser_use_session(session_id)
             stop_result = stop_browser_use_session(session_id)
             if stop_result.status != "error":
-                output = stop_result.output
+                output = stop_result.output or latest.output
+                output_has_result = _output_has_result(output)
                 output_success = _output_is_success(output)
                 return BrowserUseRunResult(
                     attempted=True,
                     status=stop_result.status,
                     summary=(
                         f"{_output_summary(output)} セッションはコスト抑制のため自動停止しました。"
-                        if output_success
+                        if output_has_result
                         else "規定時間内に完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。"
                     ),
                     session_id=stop_result.session_id or session_id,
-                    live_url=stop_result.live_url or session.get("liveUrl"),
-                    last_step_summary=stop_result.last_step_summary or session.get("lastStepSummary"),
+                    live_url=stop_result.live_url or latest.live_url or session.get("liveUrl"),
+                    last_step_summary=stop_result.last_step_summary or latest.last_step_summary or session.get("lastStepSummary"),
                     output=output,
                     is_success=True if output_success else stop_result.is_success,
-                    total_cost_usd=stop_result.total_cost_usd,
-                    screenshot_url=stop_result.screenshot_url,
+                    total_cost_usd=stop_result.total_cost_usd or latest.total_cost_usd,
+                    screenshot_url=stop_result.screenshot_url or latest.screenshot_url,
                 )
             return BrowserUseRunResult(
                 attempted=True,
@@ -567,13 +603,14 @@ def run_seller_central_access_check(client: dict[str, Any], question: str) -> Br
             stop_result = stop_browser_use_session(session_id)
             if stop_result.status != "error":
                 output = stop_result.output or latest.output
+                output_has_result = _output_has_result(output)
                 output_success = _output_is_success(output)
                 return BrowserUseRunResult(
                     attempted=True,
                     status=stop_result.status,
                     summary=(
                         f"{_output_summary(output)} セッションはコスト抑制のため自動停止しました。"
-                        if output_success
+                        if output_has_result
                         else "規定時間内に到達確認が完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。"
                     ),
                     session_id=stop_result.session_id or session_id,

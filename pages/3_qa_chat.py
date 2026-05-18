@@ -160,10 +160,18 @@ def fallback_answer(question: str) -> str:
 def fetch_status_label(fetch_result: BrowserUseRunResult | None) -> str:
     if fetch_result is None:
         return "未実行（実データ取得スイッチがオフ）"
-    if isinstance(fetch_result.output, dict) and fetch_result.output.get("status") == "success":
-        if fetch_result.status == "stopped":
-            return "完了（停止済み）"
-        return "完了"
+    if isinstance(fetch_result.output, dict):
+        output_status = fetch_result.output.get("status")
+        if output_status == "success":
+            if fetch_result.status == "stopped":
+                return "完了（停止済み）"
+            return "完了"
+        if output_status == "partial":
+            if fetch_result.status == "stopped":
+                return "一部取得（停止済み）"
+            return "一部取得"
+        if output_status == "blocked":
+            return "要確認"
     if fetch_result.status == "stopped":
         if fetch_result.is_success is True:
             return "完了"
