@@ -53,7 +53,7 @@ class BrowserUseRunResult:
             "is_success": self.is_success,
             "total_cost_usd": self.total_cost_usd,
             "error": self.error,
-            "screenshot_url": self.screenshot_url,
+            "screenshot": "取得あり" if self.screenshot_url else "なし",
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -346,10 +346,15 @@ Client:
 Task:
 1. Open https://sellercentral.amazon.co.jp/
 2. Identify whether Seller Central is visible, whether login/2FA is required, and whether the selected shop/store is "{shop_name}".
-3. If a store selector is visible and "{shop_name}" is available, choose it. Do not continue if this requires login, 2FA, payment confirmation, or a paid upgrade confirmation.
-4. Navigate only as far as an advertising or campaign manager screen. Stop as soon as an advertising page is visible.
-5. Do not retrieve advertising metrics. This is only an access check.
-6. Return the requested structured result with the current URL, page title, visible screen description, and blocker if any.
+3. If Seller Central home is visible, do not wait on the home page. Continue to the advertising access check.
+4. If a store selector is visible and "{shop_name}" is available, choose it. Do not continue if this requires login, 2FA, payment confirmation, or a paid upgrade confirmation.
+5. Try to reach an advertising or campaign manager screen using direct navigation first:
+   - https://advertising.amazon.co.jp/cm/campaigns
+   - https://advertising.amazon.co.jp/
+   If direct navigation redirects back to Seller Central, use the visible Seller Central navigation/search to open "広告", "キャンペーンマネージャー", "広告キャンペーン", or "Advertising".
+6. Stop as soon as an Amazon Ads, advertising, campaigns, or campaign manager page is visible. Do not retrieve advertising metrics.
+7. If you are still on Seller Central home after trying the direct advertising URL and visible navigation once, return status "blocked" with blocked_by "seller_central_home_navigation".
+8. Return the requested structured result with the current URL, page title, visible screen description, and blocker if any.
 """
 
 
