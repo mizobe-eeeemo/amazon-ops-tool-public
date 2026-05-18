@@ -4,7 +4,12 @@ import json
 
 import streamlit as st
 
-from lib.browser_use_client import BrowserUseRunResult, get_browser_use_config, run_seller_central_metrics_fetch
+from lib.browser_use_client import (
+    BrowserUseRunResult,
+    get_browser_use_config,
+    run_seller_central_metrics_fetch,
+    stop_browser_use_session,
+)
 from lib.claude_client import complete
 from lib.db import add_chat_message, get_chat_messages
 from lib.prompts import INTERNAL_KNOWLEDGE, QA_SYSTEM_PROMPT
@@ -24,6 +29,18 @@ seller_fetch_enabled = st.toggle(
 )
 if seller_fetch_enabled:
     st.warning("browser-useを起動します。ログイン、2FA、課金確認、変更確認が必要な画面では取得を止める指示を入れています。")
+
+with st.expander("実行中のbrowser-useセッションを停止"):
+    st.caption("セッションIDはライブURLの末尾にあるUUIDです。例: live.browser-use.com/session/この部分")
+    stop_session_id = st.text_input("停止するセッションID", key="browser_use_stop_session_id")
+    if st.button("このセッションを停止", key="stop_browser_use_session"):
+        stop_result = stop_browser_use_session(stop_session_id)
+        if stop_result.status == "error":
+            st.error(stop_result.summary)
+            if stop_result.error:
+                st.caption(stop_result.error)
+        else:
+            st.success(f"{stop_result.summary} ステータス: {stop_result.status}")
 
 messages = get_chat_messages(client["id"], limit=30)
 for message in messages:

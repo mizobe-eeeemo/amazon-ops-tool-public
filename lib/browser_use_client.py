@@ -73,11 +73,11 @@ def get_browser_use_config() -> BrowserUseConfig:
     profile_id = _secret_or_env("BROWSER_USE_PROFILE_ID_SELLER_CENTRAL")
     profile_id_b = _secret_or_env("BROWSER_USE_PROFILE_ID_SELLER_CENTRAL_B")
     default_model = _secret_or_env("BROWSER_USE_MODEL", "bu-mini") or "bu-mini"
-    max_cost_usd = _secret_or_env("BROWSER_USE_MAX_COST_USD", "0.50") or "0.50"
+    max_cost_usd = _secret_or_env("BROWSER_USE_MAX_COST_USD", "0.25") or "0.25"
     proxy_country_code = _secret_or_env("BROWSER_USE_PROXY_COUNTRY_CODE", "jp")
     if proxy_country_code and proxy_country_code.lower() in {"none", "off", "false"}:
         proxy_country_code = None
-    timeout_raw = _secret_or_env("BROWSER_USE_POLL_TIMEOUT_SECONDS", "90") or "90"
+    timeout_raw = _secret_or_env("BROWSER_USE_POLL_TIMEOUT_SECONDS", "75") or "75"
     try:
         poll_timeout_seconds = max(10, min(180, int(timeout_raw)))
     except ValueError:
@@ -170,6 +170,31 @@ def _browser_use_request(method: str, path: str, payload: dict[str, Any] | None 
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise BrowserUseError("browser-use API returned invalid JSON.") from exc
+
+
+def stop_browser_use_session(session_id: str) -> BrowserUseRunResult:
+    cleaned_session_id = session_id.strip()
+    if not cleaned_session_id:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="停止するbrowser-useセッションIDを入力してください。",
+        )
+    try:
+        session = _browser_use_request(
+            "POST",
+            f"/api/v3/sessions/{cleaned_session_id}/stop",
+            {"strategy": "session"},
+        )
+        return _result_from_session(session, summary="browser-useセッションを停止しました。")
+    except BrowserUseError as exc:
+        return BrowserUseRunResult(
+            attempted=True,
+            status="error",
+            summary="browser-useセッション停止に失敗しました。",
+            session_id=cleaned_session_id,
+            error=str(exc),
+        )
 
 
 SELLER_CENTRAL_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -324,9 +349,30 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
             session = _browser_use_request("GET", f"/api/v3/sessions/{session_id}")
 
         if str(session.get("status") or "") not in final_statuses:
-            return _result_from_session(
-                session,
-                summary="browser-useはまだ実行中です。ライブ画面または再読み込み後の状態確認が必要です。",
+            stop_result = stop_browser_use_session(session_id)
+            if stop_result.status != "error":
+                return BrowserUseRunResult(
+                    attempted=True,
+                    status=stop_result.status,
+                    summary="規定時間内に完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。",
+                    session_id=stop_result.session_id or session_id,
+                    live_url=stop_result.live_url or session.get("liveUrl"),
+                    last_step_summary=stop_result.last_step_summary or session.get("lastStepSummary"),
+                    output=stop_result.output,
+                    is_success=stop_result.is_success,
+                    total_cost_usd=stop_result.total_cost_usd,
+                )
+            return BrowserUseRunResult(
+                attempted=True,
+                status=str(session.get("status") or "running"),
+                summary="browser-useはまだ実行中です。自動停止も失敗したため、ライブ画面から手動停止してください。",
+                session_id=session_id,
+                live_url=session.get("liveUrl"),
+                last_step_summary=session.get("lastStepSummary"),
+                output=session.get("output"),
+                is_success=session.get("isTaskSuccessful"),
+                total_cost_usd=str(session.get("totalCostUsd")) if session.get("totalCostUsd") is not None else None,
+                error=stop_result.error,
             )
         return _result_from_session(session)
     except BrowserUseError as exc:
