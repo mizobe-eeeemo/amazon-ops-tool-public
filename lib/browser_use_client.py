@@ -220,6 +220,22 @@ def get_browser_use_session(session_id: str) -> BrowserUseRunResult:
         )
 
 
+def _output_status(output: Any) -> str:
+    if isinstance(output, dict):
+        return str(output.get("status") or "")
+    return ""
+
+
+def _output_summary(output: Any) -> str:
+    if isinstance(output, dict):
+        return str(output.get("summary") or "")
+    return ""
+
+
+def _output_is_success(output: Any) -> bool:
+    return _output_status(output).lower() == "success"
+
+
 SELLER_CENTRAL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -366,13 +382,14 @@ def _result_from_session(session: dict[str, Any], summary: str | None = None) ->
             output = json.loads(output)
         except json.JSONDecodeError:
             pass
-    output_summary = ""
-    if isinstance(output, dict):
-        output_summary = str(output.get("summary") or "")
+    output_summary = _output_summary(output)
     if not output_summary:
         output_summary = summary or str(session.get("lastStepSummary") or "")
     if not output_summary:
         output_summary = "browser-useの実行結果を取得しました。"
+    is_success = session.get("isTaskSuccessful")
+    if is_success is None and _output_is_success(output):
+        is_success = True
     return BrowserUseRunResult(
         attempted=True,
         status=status,
@@ -381,7 +398,7 @@ def _result_from_session(session: dict[str, Any], summary: str | None = None) ->
         live_url=session.get("liveUrl"),
         last_step_summary=session.get("lastStepSummary"),
         output=output,
-        is_success=session.get("isTaskSuccessful"),
+        is_success=is_success,
         total_cost_usd=str(session.get("totalCostUsd")) if session.get("totalCostUsd") is not None else None,
         screenshot_url=session.get("screenshotUrl"),
     )
@@ -447,15 +464,21 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
         if str(session.get("status") or "") not in final_statuses:
             stop_result = stop_browser_use_session(session_id)
             if stop_result.status != "error":
+                output = stop_result.output
+                output_success = _output_is_success(output)
                 return BrowserUseRunResult(
                     attempted=True,
                     status=stop_result.status,
-                    summary="規定時間内に完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。",
+                    summary=(
+                        f"{_output_summary(output)} セッションはコスト抑制のため自動停止しました。"
+                        if output_success
+                        else "規定時間内に完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。"
+                    ),
                     session_id=stop_result.session_id or session_id,
                     live_url=stop_result.live_url or session.get("liveUrl"),
                     last_step_summary=stop_result.last_step_summary or session.get("lastStepSummary"),
-                    output=stop_result.output,
-                    is_success=stop_result.is_success,
+                    output=output,
+                    is_success=True if output_success else stop_result.is_success,
                     total_cost_usd=stop_result.total_cost_usd,
                     screenshot_url=stop_result.screenshot_url,
                 )
@@ -543,15 +566,21 @@ def run_seller_central_access_check(client: dict[str, Any], question: str) -> Br
             latest = get_browser_use_session(session_id)
             stop_result = stop_browser_use_session(session_id)
             if stop_result.status != "error":
+                output = stop_result.output or latest.output
+                output_success = _output_is_success(output)
                 return BrowserUseRunResult(
                     attempted=True,
                     status=stop_result.status,
-                    summary="規定時間内に到達確認が完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。",
+                    summary=(
+                        f"{_output_summary(output)} セッションはコスト抑制のため自動停止しました。"
+                        if output_success
+                        else "規定時間内に到達確認が完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。"
+                    ),
                     session_id=stop_result.session_id or session_id,
                     live_url=stop_result.live_url or latest.live_url or session.get("liveUrl"),
                     last_step_summary=stop_result.last_step_summary or latest.last_step_summary or session.get("lastStepSummary"),
-                    output=stop_result.output or latest.output,
-                    is_success=stop_result.is_success,
+                    output=output,
+                    is_success=True if output_success else stop_result.is_success,
                     total_cost_usd=stop_result.total_cost_usd or latest.total_cost_usd,
                     screenshot_url=stop_result.screenshot_url or latest.screenshot_url,
                 )

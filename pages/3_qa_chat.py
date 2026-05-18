@@ -84,6 +84,9 @@ def needs_access_check(question: str) -> bool:
     text = question.lower()
     access_words = ["到達", "開ける", "開け", "画面", "ログイン", "2fa", "確認"]
     metric_words = ["広告費", "売上", "acos", "クリック", "cvr", "ctr", "インプレッション", "roas", "cpc"]
+    access_only_words = ["だけ確認", "到達できるか", "到達確認", "数値取得はしない", "取得はしない", "取得しない"]
+    if any(word in text for word in access_only_words):
+        return True
     return any(word in text for word in access_words) and not any(word in text for word in metric_words)
 
 
@@ -157,6 +160,10 @@ def fallback_answer(question: str) -> str:
 def fetch_status_label(fetch_result: BrowserUseRunResult | None) -> str:
     if fetch_result is None:
         return "未実行（実データ取得スイッチがオフ）"
+    if isinstance(fetch_result.output, dict) and fetch_result.output.get("status") == "success":
+        if fetch_result.status == "stopped":
+            return "完了（停止済み）"
+        return "完了"
     if fetch_result.status == "stopped":
         if fetch_result.is_success is True:
             return "完了"
