@@ -71,8 +71,19 @@ else:
 st.subheader("クライアント連携設定")
 st.caption("スプレッドシートのC列を会社名、D列をSeller Central上のショップ名として登録します。")
 
+import_result = st.session_state.pop("client_csv_import_result", None)
+if import_result:
+    st.success(f"{import_result['count']}件を追加 / 更新しました。")
+    if import_result["warnings"]:
+        with st.expander(f"スキップした行: {len(import_result['warnings'])}件"):
+            for warning in import_result["warnings"][:100]:
+                st.write(warning)
+            if len(import_result["warnings"]) > 100:
+                st.write("表示は100件までです。CSVの内容を確認してください。")
+
 clients = get_clients()
 if clients:
+    st.caption(f"登録済みクライアント: {len(clients)}件")
     rows = [
         {
             "会社名": client["name"],
@@ -103,13 +114,10 @@ if uploaded_csv is not None:
                 marketplace="Amazon.co.jp",
                 memo="CSV一括取り込み",
             )
-        st.success(f"{len(parsed_clients)}件を追加 / 更新しました。")
-        if warnings:
-            with st.expander(f"スキップした行: {len(warnings)}件"):
-                for warning in warnings[:100]:
-                    st.write(warning)
-                if len(warnings) > 100:
-                    st.write("表示は100件までです。CSVの内容を確認してください。")
+        st.session_state["client_csv_import_result"] = {
+            "count": len(parsed_clients),
+            "warnings": warnings,
+        }
         st.rerun()
 
 with st.form("client_seller_mapping_form"):
