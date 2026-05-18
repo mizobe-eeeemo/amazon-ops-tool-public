@@ -30,7 +30,7 @@ seller_fetch_enabled = st.toggle(
     help="オンにすると、広告費などの質問でbrowser-useを起動します。APIクレジットを使用します。",
 )
 if seller_fetch_enabled:
-    st.warning("browser-useを起動します。ログイン、2FA、課金確認、変更確認が必要な画面では取得を止める指示を入れています。")
+    st.warning("browser-useを起動します。広告レポートの作成・ダウンロードは許可済みとして進めます。ログイン、2FA、課金確認、広告変更確認が必要な画面では取得を止めます。")
 
 with st.expander("実行中のbrowser-useセッションを停止"):
     st.caption("セッションIDはライブURLの末尾にあるUUIDです。例: live.browser-use.com/session/この部分")
@@ -115,6 +115,7 @@ def build_prompt(question: str, history: list[dict], fetch_result: BrowserUseRun
     if needs_seller_data(question) and fetch_result:
         data_note = (
             "この質問はSeller Centralデータ確認が必要そうです。下の自動取得結果を優先して、取れた値・取れなかった値を明確に分けて回答してください。"
+            "sourceがdownloaded_ad_reportの場合は、広告レポート由来の提出用数値として扱ってください。"
             "estimated_metricsがある場合は、必ず「概算」と明記し、実広告費として扱わないでください。"
         )
     elif needs_seller_data(question):

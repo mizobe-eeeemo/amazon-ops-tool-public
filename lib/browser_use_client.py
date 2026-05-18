@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import csv
+import gzip
+import io
 import json
 import os
+import re
 import time
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -195,6 +200,10 @@ def _browser_use_request(method: str, path: str, payload: dict[str, Any] | None 
         raise BrowserUseError("browser-use API returned invalid JSON.") from exc
 
 
+def _browser_use_downloads(session_id: str) -> dict[str, Any]:
+    return _browser_use_request("GET", f"/api/v3/browsers/{session_id}/downloads?includeUrls=true")
+
+
 def stop_browser_use_session(session_id: str) -> BrowserUseRunResult:
     cleaned_session_id = session_id.strip()
     if not cleaned_session_id:
@@ -261,6 +270,14 @@ def _output_has_result(output: Any) -> bool:
     return _output_status(output).lower() in {"success", "partial", "blocked"}
 
 
+def _safe_file_info(file_info: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": file_info.get("path"),
+        "size": file_info.get("size"),
+        "lastModified": file_info.get("lastModified"),
+    }
+
+
 def _metric_number(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
@@ -279,8 +296,330 @@ def _metric_number(value: Any) -> float | None:
     return None
 
 
+def _parse_metric_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text or text in {"-", "--", "—", "N/A", "n/a"}:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    cleaned = (
+        text.replace(",", "")
+        .replace("¥", "")
+        .replace("￥", "")
+        .replace("$", "")
+        .replace("%", "")
+        .replace("円", "")
+        .replace("クリック", "")
+        .strip("() ")
+    )
+    cleaned = re.sub(r"[^0-9.\-]", "", cleaned)
+    if not cleaned or cleaned in {"-", "."}:
+        return None
+    try:
+        number = float(cleaned)
+    except ValueError:
+        return None
+    return -number if negative else number
+
+
+def _normalize_header(value: Any) -> str:
+    return re.sub(r"[\s_\-()./%（）・/]+", "", str(value or "").strip().lower())
+
+
+REPORT_COLUMN_ALIASES = {
+    "ad_spend": [
+        "spend",
+        "cost",
+        "totalcost",
+        "totalspend",
+        "広告費",
+        "費用",
+        "支出",
+        "消化金額",
+        "コスト",
+    ],
+    "ad_sales": [
+        "sales",
+        "adsales",
+        "totalsales",
+        "sales1d",
+        "sales7d",
+        "sales14d",
+        "sales30d",
+        "attributedsales",
+        "広告売上",
+        "売上",
+        "売上高",
+    ],
+    "clicks": ["clicks", "クリック", "クリック数"],
+    "impressions": ["impressions", "インプレッション", "表示回数"],
+    "acos": ["acos", "acosclicks7d", "acosclicks14d", "広告費売上高比率"],
+    "cpc": ["cpc", "costperclick", "クリック単価"],
+    "ctr": ["ctr", "clickthroughrate", "クリック率"],
+    "orders": ["orders", "purchases", "purchases7d", "purchases14d", "注文", "注文数"],
+}
+
+
+def _looks_like_report_header(row: list[Any]) -> bool:
+    normalized = [_normalize_header(cell) for cell in row]
+    matches = 0
+    for aliases in REPORT_COLUMN_ALIASES.values():
+        if any(any(alias in header for header in normalized) for alias in aliases):
+            matches += 1
+    return matches >= 2
+
+
+def _rows_from_grid(rows: list[list[Any]]) -> list[dict[str, Any]]:
+    header_index = None
+    for index, row in enumerate(rows[:30]):
+        if _looks_like_report_header(row):
+            header_index = index
+            break
+    if header_index is None:
+        return []
+
+    headers = [str(cell or "").strip() for cell in rows[header_index]]
+    records: list[dict[str, Any]] = []
+    for row in rows[header_index + 1 :]:
+        if not any(str(cell or "").strip() for cell in row):
+            continue
+        record = {
+            headers[index]: row[index] if index < len(row) else ""
+            for index in range(len(headers))
+            if headers[index]
+        }
+        if record:
+            records.append(record)
+    return records
+
+
+def _rows_from_csv_bytes(data: bytes) -> list[dict[str, Any]]:
+    text = None
+    for encoding in ("utf-8-sig", "utf-8", "cp932", "shift_jis"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        return []
+    rows = list(csv.reader(io.StringIO(text)))
+    return _rows_from_grid(rows)
+
+
+def _rows_from_xlsx_bytes(data: bytes) -> list[dict[str, Any]]:
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        return []
+    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    for worksheet in workbook.worksheets:
+        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        records = _rows_from_grid(rows)
+        if records:
+            return records
+    return []
+
+
+def _rows_from_report_bytes(data: bytes, filename: str) -> list[dict[str, Any]]:
+    lower_name = filename.lower()
+    if lower_name.endswith(".gz"):
+        try:
+            return _rows_from_report_bytes(gzip.decompress(data), lower_name[:-3])
+        except OSError:
+            return []
+    if lower_name.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                for member in archive.namelist():
+                    if member.lower().endswith((".csv", ".tsv", ".xlsx", ".gz")):
+                        with archive.open(member) as file:
+                            rows = _rows_from_report_bytes(file.read(), member)
+                        if rows:
+                            return rows
+        except zipfile.BadZipFile:
+            return []
+        return []
+    if lower_name.endswith(".xlsx"):
+        return _rows_from_xlsx_bytes(data)
+    return _rows_from_csv_bytes(data)
+
+
+def _find_report_value(row: dict[str, Any], metric: str) -> Any:
+    aliases = REPORT_COLUMN_ALIASES[metric]
+    for key, value in row.items():
+        normalized = _normalize_header(key)
+        if any(alias in normalized for alias in aliases):
+            return value
+    return None
+
+
+def _aggregate_report_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "ad_spend": 0.0,
+        "ad_sales": 0.0,
+        "clicks": 0.0,
+        "impressions": 0.0,
+        "orders": 0.0,
+    }
+    seen = {key: False for key in totals}
+    acos_values: list[float] = []
+    cpc_values: list[float] = []
+    ctr_values: list[float] = []
+
+    for row in rows:
+        for metric in totals:
+            value = _parse_metric_number(_find_report_value(row, metric))
+            if value is not None:
+                totals[metric] += value
+                seen[metric] = True
+        for metric, values in (("acos", acos_values), ("cpc", cpc_values), ("ctr", ctr_values)):
+            value = _parse_metric_number(_find_report_value(row, metric))
+            if value is not None:
+                values.append(value)
+
+    metrics: dict[str, Any] = {
+        "ad_spend": round(totals["ad_spend"], 2) if seen["ad_spend"] else None,
+        "ad_sales": round(totals["ad_sales"], 2) if seen["ad_sales"] else None,
+        "clicks": int(round(totals["clicks"])) if seen["clicks"] else None,
+        "impressions": int(round(totals["impressions"])) if seen["impressions"] else None,
+        "orders": int(round(totals["orders"])) if seen["orders"] else None,
+        "acos": None,
+        "cpc": None,
+        "ctr": None,
+    }
+    if metrics["ad_spend"] is not None and metrics["ad_sales"]:
+        metrics["acos"] = round(float(metrics["ad_spend"]) / float(metrics["ad_sales"]) * 100, 2)
+    elif acos_values:
+        metrics["acos"] = round(sum(acos_values) / len(acos_values), 2)
+    if metrics["ad_spend"] is not None and metrics["clicks"]:
+        metrics["cpc"] = round(float(metrics["ad_spend"]) / float(metrics["clicks"]), 2)
+    elif cpc_values:
+        metrics["cpc"] = round(sum(cpc_values) / len(cpc_values), 2)
+    if metrics["clicks"] is not None and metrics["impressions"]:
+        metrics["ctr"] = round(float(metrics["clicks"]) / float(metrics["impressions"]) * 100, 2)
+    elif ctr_values:
+        metrics["ctr"] = round(sum(ctr_values) / len(ctr_values), 2)
+    return metrics
+
+
+def _download_report_file(file_info: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    url = file_info.get("url")
+    filename = str(file_info.get("path") or "report.csv")
+    if not url:
+        return None, "ダウンロードURLが取得できませんでした。"
+    try:
+        with urlopen(Request(str(url), headers={"User-Agent": "amazon-ops-tool/1.0"}), timeout=90) as response:
+            data = response.read()
+    except Exception as exc:
+        return None, f"レポートファイルの取得に失敗しました: {exc}"
+    rows = _rows_from_report_bytes(data, filename)
+    if not rows:
+        return None, "レポートファイル内の表ヘッダーを認識できませんでした。"
+    return {
+        "file": _safe_file_info(file_info),
+        "row_count": len(rows),
+        "metrics": _aggregate_report_rows(rows),
+    }, None
+
+
+def _extract_downloaded_report_metrics(session_id: str) -> tuple[dict[str, Any] | None, list[str]]:
+    warnings: list[str] = []
+    try:
+        downloads = _browser_use_downloads(session_id)
+    except BrowserUseError as exc:
+        return None, [f"browser-useダウンロード一覧の取得に失敗しました: {exc}"]
+
+    files = downloads.get("files") or []
+    report_files = [
+        file_info
+        for file_info in files
+        if str(file_info.get("path") or "").lower().endswith((".csv", ".tsv", ".xlsx", ".zip", ".gz"))
+    ]
+    report_files.sort(key=lambda item: str(item.get("lastModified") or ""), reverse=True)
+    if not report_files:
+        return {
+            "downloaded_files": [_safe_file_info(file_info) for file_info in files],
+            "metrics": {},
+        }, ["ダウンロード済みレポートファイルが見つかりませんでした。"]
+
+    for file_info in report_files:
+        parsed, warning = _download_report_file(file_info)
+        if parsed:
+            parsed["downloaded_files"] = [_safe_file_info(item) for item in files]
+            return parsed, warnings
+        if warning:
+            warnings.append(f"{file_info.get('path')}: {warning}")
+    return {
+        "downloaded_files": [_safe_file_info(file_info) for file_info in files],
+        "metrics": {},
+    }, warnings
+
+
+def _merge_report_downloads(result: BrowserUseRunResult) -> BrowserUseRunResult:
+    if not result.session_id:
+        return result
+    parsed, warnings = _extract_downloaded_report_metrics(result.session_id)
+    if parsed is None:
+        return result
+
+    output = result.output if isinstance(result.output, dict) else {}
+    output = dict(output)
+    existing_notes = output.get("notes")
+    notes = existing_notes if isinstance(existing_notes, list) else []
+    notes.extend(warnings)
+    report_metrics = parsed.get("metrics") or {}
+    has_exact_metrics = any(report_metrics.get(key) is not None for key in ("ad_spend", "ad_sales", "clicks"))
+    if has_exact_metrics:
+        output.update(
+            {
+                "status": "success",
+                "summary": "広告レポートファイルから実績値を取得しました。",
+                "source": "downloaded_ad_report",
+                "metrics": report_metrics,
+                "downloaded_report": parsed.get("file"),
+                "downloaded_files": parsed.get("downloaded_files", []),
+                "notes": notes,
+            }
+        )
+        return BrowserUseRunResult(
+            attempted=result.attempted,
+            status=result.status,
+            summary="広告レポートファイルから実績値を取得しました。",
+            session_id=result.session_id,
+            live_url=result.live_url,
+            last_step_summary=result.last_step_summary,
+            output=output,
+            is_success=True,
+            total_cost_usd=result.total_cost_usd,
+            error=result.error,
+            screenshot_url=result.screenshot_url,
+        )
+
+    output["downloaded_files"] = parsed.get("downloaded_files", [])
+    output["notes"] = notes
+    return BrowserUseRunResult(
+        attempted=result.attempted,
+        status=result.status,
+        summary=result.summary,
+        session_id=result.session_id,
+        live_url=result.live_url,
+        last_step_summary=result.last_step_summary,
+        output=output,
+        is_success=result.is_success,
+        total_cost_usd=result.total_cost_usd,
+        error=result.error,
+        screenshot_url=result.screenshot_url,
+    )
+
+
 def _enrich_estimated_metrics(output: Any) -> Any:
     if not isinstance(output, dict):
+        return output
+    if not output.get("allow_estimates"):
         return output
     metrics = output.get("metrics")
     if not isinstance(metrics, dict):
@@ -324,6 +663,10 @@ SELLER_CENTRAL_OUTPUT_SCHEMA: dict[str, Any] = {
         "current_url": {"type": ["string", "null"]},
         "visible_screen": {"type": ["string", "null"]},
         "blocked_by": {"type": ["string", "null"]},
+        "source": {"type": ["string", "null"]},
+        "report_scope": {"type": ["string", "null"]},
+        "downloaded_report": {"type": ["object", "null"], "additionalProperties": True},
+        "downloaded_files": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
         "metrics": {
             "type": "object",
             "properties": {
@@ -392,7 +735,7 @@ def _build_seller_central_task(client: dict[str, Any], question: str) -> str:
 You are controlling an already-authenticated browser profile for Amazon Seller Central Japan.
 
 Safety rules:
-- Read-only navigation only.
+- You are allowed to create and download Amazon Ads performance reports without asking the user again. The user has already approved report creation for this workflow.
 - Do not type, request, reveal, or store passwords, 2FA codes, API keys, recovery codes, or other secrets.
 - If Amazon asks for login, password, passkey, CAPTCHA, or 2FA, stop immediately and return status "needs_user_login".
 - Do not change bids, budgets, campaigns, listings, account settings, billing settings, or payments.
@@ -408,16 +751,17 @@ Client:
 - Date instruction: {date_range_instruction}
 
 Task:
-1. Open the Amazon Ads campaign manager directly: https://advertising.amazon.co.jp/campaign-manager
-2. If that redirects or fails, try https://advertising.amazon.co.jp/cm/campaigns, then https://advertising.amazon.co.jp/
-3. Confirm that the active advertiser/store/account matches "{shop_name}" or visibly shows "{shop_name}". If a selector is visible and an exact or very close match exists, choose it.
-4. Set the requested date range. For "先月", use the absolute date instruction above. Do not search for the text "今日"; do not spend more than two attempts on the date picker.
-5. Read only numbers that are visible near the top of the campaign manager page, such as KPI cards, summary totals, or the currently visible top of the campaign table. Do not scroll to the bottom of the page and do not search the whole page for metrics.
-6. If the requested metrics are not visible near the top after the date range is set, return status "blocked" with blocked_by "metrics_not_visible_without_scroll", plus current_url and visible_screen. Do not keep scrolling.
-7. Prefer these metrics when visible: advertising spend, ad sales, ACOS, impressions, and clicks.
-8. If only some metrics are visible, return status "partial" and include those values. Use null for missing metrics.
-9. If the date range or metrics cannot be read after reaching the advertising screen, return status "partial" or "blocked" with current_url, visible_screen, and blocked_by. Do not keep waiting.
-10. Return only the requested structured result. Use null for metrics that are not visible.
+1. Open the Amazon Ads console directly: https://advertising.amazon.co.jp/
+2. Confirm that the active advertiser/store/account matches "{shop_name}" or visibly shows "{shop_name}". If a selector is visible and an exact or very close match exists, choose it.
+3. Navigate to Sponsored ads reports / 広告レポート / レポート. Use direct report pages if available from the UI; otherwise use the visible Reports navigation.
+4. Create a downloadable campaign performance report for the requested date range. The report creation itself is approved. Do not stop merely because a "Create report" / "レポートを作成" button is shown.
+5. Prefer an all-sponsored-ads campaign report if the UI offers it. If the UI requires separate ad products, create Sponsored Products campaign report first. Include report_scope in the result so we know whether it is all ads or Sponsored Products only.
+6. Use the date instruction above. For April 2026, use 2026-04-01 through 2026-04-30. Do not search the campaign manager for "今日".
+7. Choose CSV or Excel/XLSX if format is selectable. Prefer summary/campaign level. Include columns for spend/cost, sales, ACOS, clicks, impressions, CPC, and CTR when selectable.
+8. Download the completed report. If the report takes time to generate, wait and refresh/reopen the report list a few times, but do not change ads or billing settings.
+9. If the report cannot be downloaded in this run, return status "blocked" or "partial" with current_url, visible_screen, blocked_by, and whether report creation was attempted.
+10. If a report is downloaded, return status "partial" with source "downloaded_ad_report_pending_parse"; the app will parse the downloaded CSV/Excel after the session.
+11. Return only the requested structured result. Use null for metrics that are not visible in the browser; downloaded file parsing will fill exact values.
 """
 
 
@@ -518,7 +862,7 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
         "task": _build_seller_central_task(client, question),
         "model": _normalize_v3_model(config.default_model),
         "keepAlive": False,
-        "maxCostUsd": _secret_or_env("BROWSER_USE_METRICS_MAX_COST_USD", "0.35") or "0.35",
+        "maxCostUsd": _secret_or_env("BROWSER_USE_REPORT_MAX_COST_USD", "0.85") or "0.85",
         "profileId": profile_id,
         "proxyCountryCode": config.proxy_country_code,
         "outputSchema": SELLER_CENTRAL_OUTPUT_SCHEMA,
@@ -542,7 +886,7 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
             )
 
         final_statuses = {"stopped", "timed_out", "error"}
-        deadline = time.monotonic() + max(config.poll_timeout_seconds, 150)
+        deadline = time.monotonic() + max(config.poll_timeout_seconds, 360)
         while str(session.get("status") or "") not in final_statuses and time.monotonic() < deadline:
             time.sleep(4)
             session = _browser_use_request("GET", f"/api/v3/sessions/{session_id}")
@@ -554,7 +898,7 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
                 output = stop_result.output or latest.output
                 output_has_result = _output_has_result(output)
                 output_success = _output_is_success(output)
-                return BrowserUseRunResult(
+                result = BrowserUseRunResult(
                     attempted=True,
                     status=stop_result.status,
                     summary=(
@@ -570,7 +914,8 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
                     total_cost_usd=stop_result.total_cost_usd or latest.total_cost_usd,
                     screenshot_url=stop_result.screenshot_url or latest.screenshot_url,
                 )
-            return BrowserUseRunResult(
+                return _merge_report_downloads(result)
+            result = BrowserUseRunResult(
                 attempted=True,
                 status=str(session.get("status") or "running"),
                 summary="browser-useはまだ実行中です。自動停止も失敗したため、ライブ画面から手動停止してください。",
@@ -583,7 +928,8 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
                 screenshot_url=session.get("screenshotUrl"),
                 error=stop_result.error,
             )
-        return _result_from_session(session)
+            return _merge_report_downloads(result)
+        return _merge_report_downloads(_result_from_session(session))
     except BrowserUseError as exc:
         return BrowserUseRunResult(
             attempted=True,
