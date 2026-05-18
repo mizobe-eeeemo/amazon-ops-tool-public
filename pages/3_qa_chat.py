@@ -6,7 +6,9 @@ import streamlit as st
 
 from lib.browser_use_client import (
     BrowserUseRunResult,
+    get_browser_use_session,
     get_browser_use_config,
+    run_seller_central_access_check,
     run_seller_central_metrics_fetch,
     stop_browser_use_session,
 )
@@ -42,6 +44,26 @@ with st.expander("実行中のbrowser-useセッションを停止"):
         else:
             st.success(f"{stop_result.summary} ステータス: {stop_result.status}")
 
+with st.expander("browser-useセッション状態を確認"):
+    st.caption("停止済みセッションでも、最新のステータス・最終ステップ・スクリーンショットURLを確認できます。")
+    inspect_session_id = st.text_input("確認するセッションID", key="browser_use_inspect_session_id")
+    if st.button("このセッションを確認", key="inspect_browser_use_session"):
+        inspect_result = get_browser_use_session(inspect_session_id)
+        if inspect_result.status == "error":
+            st.error(inspect_result.summary)
+            if inspect_result.error:
+                st.caption(inspect_result.error)
+        else:
+            st.write(
+                {
+                    "status": inspect_result.status,
+                    "is_success": inspect_result.is_success,
+                    "last_step": inspect_result.last_step_summary,
+                    "cost": inspect_result.total_cost_usd,
+                    "screenshot_url": inspect_result.screenshot_url,
+                }
+            )
+
 messages = get_chat_messages(client["id"], limit=30)
 for message in messages:
     with st.chat_message(message["role"]):
@@ -53,6 +75,13 @@ for message in messages:
 def needs_seller_data(question: str) -> bool:
     keywords = ["売上", "広告", "ACOS", "CVR", "CTR", "インプレッション", "クリック", "期間", "先週", "今月", "先月"]
     return any(keyword.lower() in question.lower() for keyword in keywords)
+
+
+def needs_access_check(question: str) -> bool:
+    text = question.lower()
+    access_words = ["到達", "開ける", "開け", "画面", "ログイン", "2fa", "確認"]
+    metric_words = ["広告費", "売上", "acos", "クリック", "cvr", "ctr", "インプレッション", "roas", "cpc"]
+    return any(word in text for word in access_words) and not any(word in text for word in metric_words)
 
 
 def profile_available_for_account(account_key: str | None) -> bool:
@@ -126,7 +155,9 @@ def fetch_status_label(fetch_result: BrowserUseRunResult | None) -> str:
     if fetch_result is None:
         return "未実行（実データ取得スイッチがオフ）"
     if fetch_result.status == "stopped":
-        return "完了"
+        if fetch_result.is_success is True:
+            return "完了"
+        return "停止"
     if fetch_result.status == "timed_out":
         return "時間切れ"
     if fetch_result.status in {"running", "created", "idle"}:
@@ -156,6 +187,8 @@ def seller_central_check_block(fetch_result: BrowserUseRunResult | None = None) 
             lines.append(f"- browser-use推定コスト: ${fetch_result.total_cost_usd}")
         if fetch_result.live_url:
             lines.append(f"- 実行画面: {fetch_result.live_url}")
+        if fetch_result.screenshot_url:
+            lines.append(f"- 最終スクリーンショット: {fetch_result.screenshot_url}")
     return "\n".join(lines)
 
 
@@ -174,7 +207,10 @@ if question:
     fetch_result = None
     if needs_seller_data(question) and seller_fetch_enabled:
         with st.spinner("browser-useでSeller Centralを確認しています。ログインや2FAが必要になった場合は取得を止めます。"):
-            fetch_result = run_seller_central_metrics_fetch(client, question)
+            if needs_access_check(question):
+                fetch_result = run_seller_central_access_check(client, question)
+            else:
+                fetch_result = run_seller_central_metrics_fetch(client, question)
     prompt = build_prompt(question, messages, fetch_result)
     result = complete(prompt, system=QA_SYSTEM_PROMPT, max_tokens=1400)
     answer = result.text or fallback_answer(question)

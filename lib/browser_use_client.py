@@ -36,6 +36,7 @@ class BrowserUseRunResult:
     is_success: bool | None = None
     total_cost_usd: str | None = None
     error: str | None = None
+    screenshot_url: str | None = None
 
     @property
     def finished(self) -> bool:
@@ -52,6 +53,7 @@ class BrowserUseRunResult:
             "is_success": self.is_success,
             "total_cost_usd": self.total_cost_usd,
             "error": self.error,
+            "screenshot_url": self.screenshot_url,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -197,6 +199,27 @@ def stop_browser_use_session(session_id: str) -> BrowserUseRunResult:
         )
 
 
+def get_browser_use_session(session_id: str) -> BrowserUseRunResult:
+    cleaned_session_id = session_id.strip()
+    if not cleaned_session_id:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="確認するbrowser-useセッションIDを入力してください。",
+        )
+    try:
+        session = _browser_use_request("GET", f"/api/v3/sessions/{cleaned_session_id}")
+        return _result_from_session(session, summary="browser-useセッション状態を取得しました。")
+    except BrowserUseError as exc:
+        return BrowserUseRunResult(
+            attempted=True,
+            status="error",
+            summary="browser-useセッション状態の取得に失敗しました。",
+            session_id=cleaned_session_id,
+            error=str(exc),
+        )
+
+
 SELLER_CENTRAL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -227,6 +250,40 @@ SELLER_CENTRAL_OUTPUT_SCHEMA: dict[str, Any] = {
         "notes": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["status", "summary", "shop_name", "period", "metrics", "notes"],
+    "additionalProperties": True,
+}
+
+SELLER_CENTRAL_ACCESS_CHECK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "description": "success, needs_user_login, needs_2fa, needs_confirmation, blocked, or error",
+        },
+        "summary": {"type": "string"},
+        "shop_name": {"type": ["string", "null"]},
+        "current_url": {"type": ["string", "null"]},
+        "page_title": {"type": ["string", "null"]},
+        "reached_seller_central": {"type": "boolean"},
+        "reached_target_shop": {"type": "boolean"},
+        "reached_ad_screen": {"type": "boolean"},
+        "blocked_by": {"type": ["string", "null"]},
+        "visible_screen": {"type": "string"},
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "status",
+        "summary",
+        "shop_name",
+        "current_url",
+        "page_title",
+        "reached_seller_central",
+        "reached_target_shop",
+        "reached_ad_screen",
+        "blocked_by",
+        "visible_screen",
+        "notes",
+    ],
     "additionalProperties": True,
 }
 
@@ -263,6 +320,39 @@ Task:
 """
 
 
+def _build_seller_central_access_check_task(client: dict[str, Any], question: str) -> str:
+    today = datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
+    company_name = client.get("name") or ""
+    shop_name = client.get("shop_name") or ""
+    marketplace = client.get("marketplace") or "Amazon.co.jp"
+    return f"""
+You are controlling an already-authenticated browser profile for Amazon Seller Central Japan.
+
+Safety rules:
+- Read-only navigation only.
+- Do not fetch reports, download files, change settings, change ads, change budgets, or edit listings.
+- Do not type, request, reveal, or store passwords, 2FA codes, API keys, recovery codes, or other secrets.
+- If Amazon asks for login, password, passkey, CAPTCHA, or 2FA, stop immediately and return the current screen state.
+- Do not click any button that confirms a purchase, subscription, payment, paid upgrade, campaign launch, or billing change.
+- If a paid confirmation or billing confirmation appears, stop immediately and return the current screen state.
+
+Client:
+- Company name: {company_name}
+- Seller Central shop/store name to select: {shop_name}
+- Marketplace: {marketplace}
+- Today in Japan: {today}
+- User question: {question}
+
+Task:
+1. Open https://sellercentral.amazon.co.jp/
+2. Identify whether Seller Central is visible, whether login/2FA is required, and whether the selected shop/store is "{shop_name}".
+3. If a store selector is visible and "{shop_name}" is available, choose it. Do not continue if this requires login, 2FA, payment confirmation, or a paid upgrade confirmation.
+4. Navigate only as far as an advertising or campaign manager screen. Stop as soon as an advertising page is visible.
+5. Do not retrieve advertising metrics. This is only an access check.
+6. Return the requested structured result with the current URL, page title, visible screen description, and blocker if any.
+"""
+
+
 def _result_from_session(session: dict[str, Any], summary: str | None = None) -> BrowserUseRunResult:
     status = str(session.get("status") or "unknown")
     output = session.get("output")
@@ -288,6 +378,7 @@ def _result_from_session(session: dict[str, Any], summary: str | None = None) ->
         output=output,
         is_success=session.get("isTaskSuccessful"),
         total_cost_usd=str(session.get("totalCostUsd")) if session.get("totalCostUsd") is not None else None,
+        screenshot_url=session.get("screenshotUrl"),
     )
 
 
@@ -361,6 +452,7 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
                     output=stop_result.output,
                     is_success=stop_result.is_success,
                     total_cost_usd=stop_result.total_cost_usd,
+                    screenshot_url=stop_result.screenshot_url,
                 )
             return BrowserUseRunResult(
                 attempted=True,
@@ -372,6 +464,103 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
                 output=session.get("output"),
                 is_success=session.get("isTaskSuccessful"),
                 total_cost_usd=str(session.get("totalCostUsd")) if session.get("totalCostUsd") is not None else None,
+                screenshot_url=session.get("screenshotUrl"),
+                error=stop_result.error,
+            )
+        return _result_from_session(session)
+    except BrowserUseError as exc:
+        return BrowserUseRunResult(
+            attempted=True,
+            status="error",
+            summary="browser-use API呼び出しに失敗しました。",
+            error=str(exc),
+        )
+
+
+def run_seller_central_access_check(client: dict[str, Any], question: str) -> BrowserUseRunResult:
+    config = get_browser_use_config()
+    if not config.api_key_configured:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="BROWSER_USE_API_KEYが未設定のため、Seller Central到達確認は実行していません。",
+        )
+
+    account_key = client.get("seller_account_key")
+    profile_id = seller_central_profile_id_for_account(account_key)
+    if not profile_id:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="選択中クライアントに対応するbrowser-useプロフィールIDが未設定です。",
+        )
+    if not client.get("shop_name"):
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="選択中クライアントのショップ名が未設定です。",
+        )
+
+    payload: dict[str, Any] = {
+        "task": _build_seller_central_access_check_task(client, question),
+        "model": _normalize_v3_model(config.default_model),
+        "keepAlive": False,
+        "maxCostUsd": config.max_cost_usd,
+        "profileId": profile_id,
+        "proxyCountryCode": config.proxy_country_code,
+        "outputSchema": SELLER_CENTRAL_ACCESS_CHECK_SCHEMA,
+        "enableRecording": False,
+        "skills": True,
+        "agentmail": False,
+        "codeMode": False,
+        "cacheScript": False,
+        "autoHeal": True,
+    }
+
+    try:
+        session = _browser_use_request("POST", "/api/v3/sessions", payload)
+        session_id = session.get("id")
+        if not session_id:
+            return BrowserUseRunResult(
+                attempted=True,
+                status="failed",
+                summary="browser-useセッションIDを取得できませんでした。",
+                output=session,
+            )
+
+        final_statuses = {"stopped", "timed_out", "error"}
+        deadline = time.monotonic() + config.poll_timeout_seconds
+        while str(session.get("status") or "") not in final_statuses and time.monotonic() < deadline:
+            time.sleep(4)
+            session = _browser_use_request("GET", f"/api/v3/sessions/{session_id}")
+
+        if str(session.get("status") or "") not in final_statuses:
+            latest = get_browser_use_session(session_id)
+            stop_result = stop_browser_use_session(session_id)
+            if stop_result.status != "error":
+                return BrowserUseRunResult(
+                    attempted=True,
+                    status=stop_result.status,
+                    summary="規定時間内に到達確認が完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。",
+                    session_id=stop_result.session_id or session_id,
+                    live_url=stop_result.live_url or latest.live_url or session.get("liveUrl"),
+                    last_step_summary=stop_result.last_step_summary or latest.last_step_summary or session.get("lastStepSummary"),
+                    output=stop_result.output or latest.output,
+                    is_success=stop_result.is_success,
+                    total_cost_usd=stop_result.total_cost_usd or latest.total_cost_usd,
+                    screenshot_url=stop_result.screenshot_url or latest.screenshot_url,
+                )
+            return BrowserUseRunResult(
+                attempted=True,
+                status=str(session.get("status") or "running"),
+                summary="browser-useはまだ実行中です。自動停止も失敗したため、ライブ画面から手動停止してください。",
+                session_id=session_id,
+                live_url=session.get("liveUrl"),
+                last_step_summary=session.get("lastStepSummary"),
+                output=session.get("output"),
+                is_success=session.get("isTaskSuccessful"),
+                total_cost_usd=str(session.get("totalCostUsd")) if session.get("totalCostUsd") is not None else None,
+                screenshot_url=session.get("screenshotUrl"),
                 error=stop_result.error,
             )
         return _result_from_session(session)
