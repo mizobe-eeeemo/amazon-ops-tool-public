@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from lib.browser_use_client import profile_available_for_account
+from lib.browser_use_client import get_browser_use_config
 from lib.claude_client import complete
 from lib.db import add_chat_message, get_chat_messages
 from lib.prompts import INTERNAL_KNOWLEDGE, QA_SYSTEM_PROMPT
@@ -26,6 +26,17 @@ for message in messages:
 def needs_seller_data(question: str) -> bool:
     keywords = ["売上", "広告", "ACOS", "CVR", "CTR", "インプレッション", "クリック", "期間", "先週", "今月", "先月"]
     return any(keyword.lower() in question.lower() for keyword in keywords)
+
+
+def profile_available_for_account(account_key: str | None) -> bool:
+    config = get_browser_use_config()
+    if not config.api_key_configured:
+        return False
+    if account_key == "A":
+        return bool(config.seller_central_profile_id)
+    if account_key == "B":
+        return bool(config.seller_central_profile_id_b)
+    return False
 
 
 def build_prompt(question: str, history: list[dict]) -> str:
