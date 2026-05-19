@@ -5,17 +5,7 @@ import re
 
 import streamlit as st
 
-from lib.browser_use_client import (
-    BrowserUseRunResult,
-    check_browser_use_downloads,
-    get_browser_use_session,
-    get_browser_use_config,
-    is_amazon_ads_report_pickup_question,
-    run_amazon_ads_report_pickup,
-    run_seller_central_access_check,
-    run_seller_central_metrics_fetch,
-    stop_browser_use_session,
-)
+from lib import browser_use_client
 from lib.claude_client import complete
 from lib.db import add_chat_message, get_chat_messages
 from lib.prompts import INTERNAL_KNOWLEDGE, QA_SYSTEM_PROMPT
@@ -24,6 +14,38 @@ from lib.ui import require_workspace
 
 
 SESSION_ID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+BrowserUseRunResult = browser_use_client.BrowserUseRunResult
+get_browser_use_config = browser_use_client.get_browser_use_config
+get_browser_use_session = browser_use_client.get_browser_use_session
+run_seller_central_access_check = browser_use_client.run_seller_central_access_check
+run_seller_central_metrics_fetch = browser_use_client.run_seller_central_metrics_fetch
+stop_browser_use_session = browser_use_client.stop_browser_use_session
+
+
+def check_browser_use_downloads(session_id: str) -> BrowserUseRunResult:
+    checker = getattr(browser_use_client, "check_browser_use_downloads", None)
+    if checker:
+        return checker(session_id)
+    return BrowserUseRunResult(
+        attempted=False,
+        status="unavailable",
+        summary="ダウンロード確認機能の読み込みがまだ完了していません。ページを再読み込みしてからもう一度お試しください。",
+    )
+
+
+def is_amazon_ads_report_pickup_question(question: str) -> bool:
+    checker = getattr(browser_use_client, "is_amazon_ads_report_pickup_question", None)
+    if checker:
+        return bool(checker(question))
+    keywords = ["レポート一覧", "既存レポート", "作成済みレポート", "保留中", "処理中", "該当行"]
+    return any(keyword in question for keyword in keywords)
+
+
+def run_amazon_ads_report_pickup(client: dict, question: str) -> BrowserUseRunResult:
+    runner = getattr(browser_use_client, "run_amazon_ads_report_pickup", None)
+    if runner:
+        return runner(client, question)
+    return browser_use_client.run_seller_central_metrics_fetch(client, question)
 
 client = require_workspace("Q&Aチャット")
 
