@@ -7,7 +7,7 @@ import streamlit as st
 
 from lib import browser_use_client
 from lib.claude_client import complete
-from lib.db import add_chat_message, get_chat_messages
+from lib.db import add_chat_message, get_chat_messages, get_clients
 from lib.prompts import INTERNAL_KNOWLEDGE, QA_SYSTEM_PROMPT
 from lib.seller_central_mapping import seller_account_label
 from lib.ui import require_workspace
@@ -67,6 +67,11 @@ client = require_workspace("Q&Aチャット")
 
 st.title("Q&Aチャット")
 st.caption("クライアント別に履歴が残る運用相談スレッドです。")
+st.info(
+    "現在の自動取得対象: "
+    f"{client['name']} / Seller Centralショップ名: {client.get('shop_name') or '未設定'} / "
+    f"Seller Central: {seller_account_label(client.get('seller_account_key'))}"
+)
 
 seller_fetch_enabled = st.toggle(
     "Seller Central実データ取得を試す",
@@ -161,6 +166,41 @@ def needs_access_check(question: str) -> bool:
 def browser_use_session_id_from_text(text: str) -> str | None:
     match = SESSION_ID_PATTERN.search(text)
     return match.group(0) if match else None
+
+
+def mentioned_other_client(question: str, selected_client: dict) -> dict | None:
+    selected_id = selected_client.get("id")
+    for candidate in get_clients():
+        if candidate.get("id") == selected_id:
+            continue
+        names = [candidate.get("name") or "", candidate.get("shop_name") or ""]
+        if any(name and len(name) >= 2 and name in question for name in names):
+            return candidate
+    return None
+
+
+def client_mismatch_result(other_client: dict) -> BrowserUseRunResult:
+    return BrowserUseRunResult(
+        attempted=False,
+        status="unavailable",
+        summary=(
+            "質問文の対象クライアントと、左メニューで選択中のクライアントが違うため、"
+            "安全のためbrowser-useを起動しませんでした。"
+        ),
+        output={
+            "status": "blocked",
+            "summary": "選択中クライアントを確認してください。",
+            "blocked_by": "selected_client_mismatch",
+            "mentioned_client": other_client.get("name"),
+            "mentioned_shop_name": other_client.get("shop_name"),
+            "selected_client": client.get("name"),
+            "selected_shop_name": client.get("shop_name"),
+            "metrics": {},
+            "notes": [
+                "左メニューのクライアント選択を、質問文の対象クライアントに切り替えてから再実行してください。"
+            ],
+        },
+    )
 
 
 def profile_available_for_account(account_key: str | None) -> bool:
@@ -294,6 +334,11 @@ def automated_fetch_answer(fetch_result: BrowserUseRunResult) -> str:
             "対象のキャンペーンレポート行は見えましたが、押せるダウンロードアイコンを確認できませんでした。\n\n"
             "手動取得には切り替えません。次は同じ行のダウンロードアイコン表示だけを再確認します。"
         )
+    if blocked_by == "selected_client_mismatch":
+        return (
+            "質問文の対象クライアントと、左メニューで選択中のクライアントが違っていたため、browser-useを起動せずに止めました。\n\n"
+            "左メニューのクライアント選択を対象クライアントに切り替えてから、同じ依頼文で再実行してください。"
+        )
 
     return (
         "今回は広告レポートのダウンロード完了までは確認できませんでした。\n\n"
@@ -369,17 +414,21 @@ if question:
     fetch_result = None
     if needs_seller_data(question) and seller_fetch_enabled:
         with st.spinner("browser-useでSeller Centralを確認しています。ログインや2FAが必要になった場合は取得を止めます。"):
-            session_id = browser_use_session_id_from_text(question)
-            if session_id and "ダウンロード" in question:
-                fetch_result = check_browser_use_downloads(session_id)
-            elif is_visible_report_download_question(question):
-                fetch_result = run_visible_report_download(client, question)
-            elif is_amazon_ads_report_pickup_question(question):
-                fetch_result = run_amazon_ads_report_pickup(client, question)
-            elif needs_access_check(question):
-                fetch_result = run_seller_central_access_check(client, question)
+            other_client = mentioned_other_client(question, client)
+            if other_client:
+                fetch_result = client_mismatch_result(other_client)
             else:
-                fetch_result = run_seller_central_metrics_fetch(client, question)
+                session_id = browser_use_session_id_from_text(question)
+                if session_id and "ダウンロード" in question:
+                    fetch_result = check_browser_use_downloads(session_id)
+                elif is_visible_report_download_question(question):
+                    fetch_result = run_visible_report_download(client, question)
+                elif is_amazon_ads_report_pickup_question(question):
+                    fetch_result = run_amazon_ads_report_pickup(client, question)
+                elif needs_access_check(question):
+                    fetch_result = run_seller_central_access_check(client, question)
+                else:
+                    fetch_result = run_seller_central_metrics_fetch(client, question)
     if needs_seller_data(question) and fetch_result is not None:
         answer = automated_fetch_answer(fetch_result)
         result_used_api = False
