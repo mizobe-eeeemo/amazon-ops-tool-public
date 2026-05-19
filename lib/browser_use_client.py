@@ -170,6 +170,25 @@ def _date_range_instruction(question: str, today: datetime) -> str:
     )
 
 
+def _is_report_pickup_question(question: str) -> bool:
+    keywords = ["レポート一覧", "直近作成済み", "完了していれば", "保留中", "重複作成しない"]
+    return any(keyword in question for keyword in keywords)
+
+
+def _report_workflow_instruction(question: str) -> str:
+    if _is_report_pickup_question(question):
+        return (
+            "Report pickup mode: a matching report may already exist from a previous run. Do not create a duplicate report. "
+            "Open the reports list, use browser reload once, reopen the One-time / 1回限り tab if needed, and find the matching report. "
+            "If it is ready, download it. If it is still pending after one more reload check, return status blocked with blocked_by "
+            '"report_processing_not_ready". Keep this run short and focused on downloading an existing report.'
+        )
+    return (
+        "Report creation mode: create the requested report if no matching report exists, then check the reports list. "
+        "If the matching report is pending, refresh the browser page at most twice. If it is still pending, return blocked instead of waiting until the session cost limit."
+    )
+
+
 def _browser_use_request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     api_key = _get_api_key()
     if not api_key:
@@ -728,6 +747,7 @@ def _build_seller_central_task(client: dict[str, Any], question: str) -> str:
     now = datetime.now(ZoneInfo("Asia/Tokyo"))
     today = now.date().isoformat()
     date_range_instruction = _date_range_instruction(question, now)
+    report_workflow_instruction = _report_workflow_instruction(question)
     company_name = client.get("name") or ""
     shop_name = client.get("shop_name") or ""
     marketplace = client.get("marketplace") or "Amazon.co.jp"
@@ -749,14 +769,15 @@ Client:
 - Today in Japan: {today}
 - User question: {question}
 - Date instruction: {date_range_instruction}
+- Report workflow instruction: {report_workflow_instruction}
 
 Task:
 1. Open the Amazon Ads console directly: https://advertising.amazon.co.jp/
 2. Confirm that the active advertiser/store/account matches "{shop_name}" or visibly shows "{shop_name}". If a selector is visible and an exact or very close match exists, choose it.
 3. Navigate to Sponsored ads reports / 広告レポート / レポート. Use direct report pages if available from the UI; otherwise use the visible Reports navigation.
-4. Before creating anything new, inspect the reports list for a recently created report that matches the requested date range and campaign/Sponsored Products scope. If it is complete or has a download icon/button, download it immediately.
-5. If the matching report is visible but still processing, wait 45 seconds, then refresh the browser page using the browser reload action. After reload, reopen the One-time / 1回限り reports tab if needed and re-check the matching row. Repeat this refresh-and-check cycle up to 4 times. Do not create a duplicate while a matching report is still processing.
-6. If no matching report exists, create a downloadable campaign performance report for the requested date range. The report creation itself is approved. Do not stop merely because a "Create report" / "レポートを作成" button is shown.
+4. Follow the Report workflow instruction above. Before creating anything new, inspect the reports list for a recently created report that matches the requested date range and campaign/Sponsored Products scope. If it is complete or has a download icon/button, download it immediately.
+5. If the matching report is visible but still processing, use the refresh behavior from the Report workflow instruction. Do not wait until the session cost limit. Do not create a duplicate while a matching report is still processing.
+6. If no matching report exists and the Report workflow instruction is creation mode, create a downloadable campaign performance report for the requested date range. The report creation itself is approved. Do not stop merely because a "Create report" / "レポートを作成" button is shown.
 7. Prefer an all-sponsored-ads campaign report if the UI offers it. If the UI requires separate ad products, create Sponsored Products campaign report first. Include report_scope in the result so we know whether it is all ads or Sponsored Products only.
 8. Use the date instruction above. For April 2026, use 2026-04-01 through 2026-04-30. Do not search the campaign manager for "今日".
 9. Choose CSV or Excel/XLSX if format is selectable. Prefer summary/campaign level. Include columns for spend/cost, sales, ACOS, clicks, impressions, CPC, and CTR when selectable.
@@ -865,7 +886,12 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
         "task": _build_seller_central_task(client, question),
         "model": _normalize_v3_model(config.default_model),
         "keepAlive": False,
-        "maxCostUsd": _secret_or_env("BROWSER_USE_REPORT_MAX_COST_USD", "0.85") or "0.85",
+        "maxCostUsd": (
+            _secret_or_env("BROWSER_USE_REPORT_PICKUP_MAX_COST_USD", "0.45")
+            if _is_report_pickup_question(question)
+            else _secret_or_env("BROWSER_USE_REPORT_MAX_COST_USD", "0.85")
+        )
+        or "0.85",
         "profileId": profile_id,
         "proxyCountryCode": config.proxy_country_code,
         "outputSchema": SELLER_CENTRAL_OUTPUT_SCHEMA,
@@ -889,7 +915,11 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
             )
 
         final_statuses = {"stopped", "timed_out", "error"}
-        deadline = time.monotonic() + max(config.poll_timeout_seconds, 420)
+        deadline = time.monotonic() + (
+            max(config.poll_timeout_seconds, 180)
+            if _is_report_pickup_question(question)
+            else max(config.poll_timeout_seconds, 420)
+        )
         while str(session.get("status") or "") not in final_statuses and time.monotonic() < deadline:
             time.sleep(4)
             session = _browser_use_request("GET", f"/api/v3/sessions/{session_id}")
