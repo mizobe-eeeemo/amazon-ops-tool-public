@@ -190,6 +190,17 @@ def is_amazon_ads_report_pickup_question(question: str) -> bool:
     return _is_report_pickup_question(question)
 
 
+def is_visible_report_download_question(question: str) -> bool:
+    keywords = [
+        "下向きダウンロードアイコンだけ",
+        "下向き矢印を1回",
+        "ダウンロードアイコンだけ",
+        "矢印だけ",
+        "表示中の",
+    ]
+    return "ダウンロード" in question and any(keyword in question for keyword in keywords)
+
+
 def _report_workflow_instruction(question: str) -> str:
     if _is_report_pickup_question(question):
         return (
@@ -942,6 +953,43 @@ Task:
 """
 
 
+def _build_visible_report_download_task(client: dict[str, Any], question: str) -> str:
+    today = datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
+    company_name = client.get("name") or ""
+    shop_name = client.get("shop_name") or ""
+    marketplace = client.get("marketplace") or "Amazon.co.jp"
+    return f"""
+You are controlling an already-authenticated browser profile for Amazon Ads Japan.
+
+Safety rules:
+- This is an ultra-short click-only pickup run.
+- You may download an already-created Amazon Ads report, but you must not create a new report.
+- Do not type, request, reveal, or store passwords, 2FA codes, API keys, recovery codes, signed URLs, or other secrets.
+- If Amazon asks for login, password, passkey, CAPTCHA, or 2FA, stop immediately and return status "needs_user_login".
+- Do not change bids, budgets, campaigns, listings, account settings, billing settings, or payments.
+- Do not click any button that confirms a purchase, subscription, payment, campaign launch, paid upgrade, billing change, budget change, or advertising change.
+- If a paid confirmation, budget confirmation, billing confirmation, or advertising-change confirmation appears, stop immediately and return status "needs_confirmation".
+- Do not run JavaScript, page-wide scripts, table extraction scripts, console commands, or broad DOM scans. Use visible UI clicks only.
+
+Client:
+- Company name: {company_name}
+- Seller Central shop/store name to select: {shop_name}
+- Marketplace: {marketplace}
+- Today in Japan: {today}
+- User question: {question}
+
+Task:
+1. First look at the current browser page. If an Amazon Ads reports table is already visible, do not navigate away and do not refresh.
+2. In the visible table only, find a row titled "スポンサープロダクト広告 キャンペーン レポート". Prefer the first visible matching row.
+3. If that row has a down-arrow download icon in the same row, click that icon exactly once.
+4. After clicking the down-arrow download icon, stop immediately and return status "partial" with source "downloaded_ad_report_pending_parse".
+5. If the matching campaign report row is not visible on the current screen, do not search, do not scroll more than once, do not paginate, and do not use the search box. Return status "blocked" with blocked_by "matching_report_not_visible".
+6. If a matching row is visible but has no enabled download icon, return status "blocked" with blocked_by "download_icon_not_available".
+7. Only if the current page is not an Amazon Ads reports page, open https://advertising.amazon.co.jp/reports and wait briefly for the report table. Then perform steps 2-6 once.
+8. Return only the requested structured result. Use null for metrics that are not visible in the browser; downloaded file parsing will fill exact values.
+"""
+
+
 def _build_seller_central_access_check_task(client: dict[str, Any], question: str) -> str:
     today = datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
     company_name = client.get("name") or ""
@@ -1088,6 +1136,117 @@ def run_amazon_ads_report_pickup(client: dict[str, Any], question: str) -> Brows
                         f"{_output_summary(output)} セッションは短時間確認の上限で自動停止しました。"
                         if output_has_result
                         else "短時間のレポート一覧確認が完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。"
+                    ),
+                    session_id=stop_result.session_id or session_id,
+                    live_url=stop_result.live_url or latest.live_url or session.get("liveUrl"),
+                    last_step_summary=stop_result.last_step_summary or latest.last_step_summary or session.get("lastStepSummary"),
+                    output=output,
+                    is_success=True if output_success else stop_result.is_success,
+                    total_cost_usd=stop_result.total_cost_usd or latest.total_cost_usd,
+                    screenshot_url=stop_result.screenshot_url or latest.screenshot_url,
+                )
+                return _merge_report_downloads(result)
+            result = BrowserUseRunResult(
+                attempted=True,
+                status=str(session.get("status") or "running"),
+                summary="browser-useはまだ実行中です。自動停止も失敗したため、ライブ画面から手動停止してください。",
+                session_id=session_id,
+                live_url=session.get("liveUrl"),
+                last_step_summary=session.get("lastStepSummary"),
+                output=session.get("output"),
+                is_success=session.get("isTaskSuccessful"),
+                total_cost_usd=str(session.get("totalCostUsd")) if session.get("totalCostUsd") is not None else None,
+                screenshot_url=session.get("screenshotUrl"),
+                error=stop_result.error,
+            )
+            return _merge_report_downloads(result)
+        return _merge_report_downloads(_result_from_session(session))
+    except BrowserUseError as exc:
+        return BrowserUseRunResult(
+            attempted=True,
+            status="error",
+            summary="browser-use API呼び出しに失敗しました。",
+            error=str(exc),
+        )
+
+
+def run_visible_report_download(client: dict[str, Any], question: str) -> BrowserUseRunResult:
+    config = get_browser_use_config()
+    if not config.api_key_configured:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="BROWSER_USE_API_KEYが未設定のため、広告レポート確認は実行していません。",
+        )
+
+    account_key = client.get("seller_account_key")
+    profile_id = seller_central_profile_id_for_account(account_key)
+    if not profile_id:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="選択中クライアントに対応するbrowser-useプロフィールIDが未設定です。",
+        )
+    if not client.get("shop_name"):
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="選択中クライアントのショップ名が未設定です。",
+        )
+
+    timeout_raw = _secret_or_env("BROWSER_USE_VISIBLE_DOWNLOAD_TIMEOUT_SECONDS", "90") or "90"
+    try:
+        timeout_seconds = max(45, min(150, int(timeout_raw)))
+    except ValueError:
+        timeout_seconds = 90
+
+    payload: dict[str, Any] = {
+        "task": _build_visible_report_download_task(client, question),
+        "model": _normalize_v3_model(config.default_model),
+        "keepAlive": False,
+        "maxCostUsd": _secret_or_env("BROWSER_USE_VISIBLE_DOWNLOAD_MAX_COST_USD", "0.25") or "0.25",
+        "profileId": profile_id,
+        "proxyCountryCode": config.proxy_country_code,
+        "outputSchema": SELLER_CENTRAL_OUTPUT_SCHEMA,
+        "enableRecording": False,
+        "skills": False,
+        "agentmail": False,
+        "codeMode": False,
+        "cacheScript": False,
+        "autoHeal": False,
+    }
+
+    try:
+        session = _browser_use_request("POST", "/api/v3/sessions", payload)
+        session_id = session.get("id")
+        if not session_id:
+            return BrowserUseRunResult(
+                attempted=True,
+                status="failed",
+                summary="browser-useセッションIDを取得できませんでした。",
+                output=session,
+            )
+
+        final_statuses = {"stopped", "timed_out", "error"}
+        deadline = time.monotonic() + timeout_seconds
+        while str(session.get("status") or "") not in final_statuses and time.monotonic() < deadline:
+            time.sleep(3)
+            session = _browser_use_request("GET", f"/api/v3/sessions/{session_id}")
+
+        if str(session.get("status") or "") not in final_statuses:
+            latest = get_browser_use_session(session_id)
+            stop_result = stop_browser_use_session(session_id)
+            if stop_result.status != "error":
+                output = stop_result.output or latest.output
+                output_has_result = _output_has_result(output)
+                output_success = _output_is_success(output)
+                result = BrowserUseRunResult(
+                    attempted=True,
+                    status=stop_result.status,
+                    summary=(
+                        f"{_output_summary(output)} セッションは矢印クリック専用確認の上限で自動停止しました。"
+                        if output_has_result
+                        else "矢印クリック専用確認が完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。"
                     ),
                     session_id=stop_result.session_id or session_id,
                     live_url=stop_result.live_url or latest.live_url or session.get("liveUrl"),

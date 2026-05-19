@@ -41,11 +41,27 @@ def is_amazon_ads_report_pickup_question(question: str) -> bool:
     return any(keyword in question for keyword in keywords)
 
 
+def is_visible_report_download_question(question: str) -> bool:
+    checker = getattr(browser_use_client, "is_visible_report_download_question", None)
+    if checker:
+        return bool(checker(question))
+    keywords = ["下向きダウンロードアイコンだけ", "下向き矢印を1回", "ダウンロードアイコンだけ", "矢印だけ"]
+    return "ダウンロード" in question and any(keyword in question for keyword in keywords)
+
+
 def run_amazon_ads_report_pickup(client: dict, question: str) -> BrowserUseRunResult:
     runner = getattr(browser_use_client, "run_amazon_ads_report_pickup", None)
     if runner:
         return runner(client, question)
     return browser_use_client.run_seller_central_metrics_fetch(client, question)
+
+
+def run_visible_report_download(client: dict, question: str) -> BrowserUseRunResult:
+    runner = getattr(browser_use_client, "run_visible_report_download", None)
+    if runner:
+        return runner(client, question)
+    return run_amazon_ads_report_pickup(client, question)
+
 
 client = require_workspace("Q&Aチャット")
 
@@ -268,6 +284,16 @@ def automated_fetch_answer(fetch_result: BrowserUseRunResult) -> str:
             "短時間確認では、該当するキャンペーンレポート行を確定できませんでした。\n\n"
             "手動取得には切り替えません。次は、表示中のレポート一覧で「スポンサープロダクト広告 キャンペーン レポート」の行と下向き矢印だけに対象を絞って再実行します。"
         )
+    if blocked_by == "matching_report_not_visible":
+        return (
+            "表示中画面では、対象のキャンペーンレポート行を確認できませんでした。\n\n"
+            "手動取得には切り替えません。次は、Amazon Adsレポート一覧を表示した状態に寄せてから、同じ下向き矢印クリック専用タスクを再実行します。"
+        )
+    if blocked_by == "download_icon_not_available":
+        return (
+            "対象のキャンペーンレポート行は見えましたが、押せるダウンロードアイコンを確認できませんでした。\n\n"
+            "手動取得には切り替えません。次は同じ行のダウンロードアイコン表示だけを再確認します。"
+        )
 
     return (
         "今回は広告レポートのダウンロード完了までは確認できませんでした。\n\n"
@@ -346,6 +372,8 @@ if question:
             session_id = browser_use_session_id_from_text(question)
             if session_id and "ダウンロード" in question:
                 fetch_result = check_browser_use_downloads(session_id)
+            elif is_visible_report_download_question(question):
+                fetch_result = run_visible_report_download(client, question)
             elif is_amazon_ads_report_pickup_question(question):
                 fetch_result = run_amazon_ads_report_pickup(client, question)
             elif needs_access_check(question):
