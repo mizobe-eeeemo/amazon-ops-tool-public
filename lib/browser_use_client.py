@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -247,8 +248,43 @@ def _browser_use_request(method: str, path: str, payload: dict[str, Any] | None 
         raise BrowserUseError("browser-use API returned invalid JSON.") from exc
 
 
+def _browser_use_browser_sessions(filter_by: str | None = None, page_number: int = 1) -> dict[str, Any]:
+    params: dict[str, Any] = {"pageSize": 100, "pageNumber": page_number}
+    if filter_by:
+        params["filterBy"] = filter_by
+    return _browser_use_request("GET", f"/api/v3/browsers?{urlencode(params)}")
+
+
+def _browser_session_id_for_agent_session(agent_session_id: str) -> str | None:
+    for filter_by in ("active", "stopped", None):
+        for page_number in range(1, 4):
+            try:
+                payload = _browser_use_browser_sessions(filter_by, page_number)
+            except BrowserUseError:
+                continue
+            items = payload.get("items") or []
+            for item in items:
+                if str(item.get("agentSessionId") or "") == agent_session_id:
+                    browser_id = item.get("id")
+                    return str(browser_id) if browser_id else None
+            total_items = int(payload.get("totalItems") or 0)
+            page_size = int(payload.get("pageSize") or 100)
+            if total_items <= page_number * page_size:
+                break
+    return None
+
+
 def _browser_use_downloads(session_id: str) -> dict[str, Any]:
-    return _browser_use_request("GET", f"/api/v3/browsers/{session_id}/downloads?includeUrls=true")
+    try:
+        return _browser_use_request("GET", f"/api/v3/browsers/{session_id}/downloads?includeUrls=true")
+    except BrowserUseError as exc:
+        error_text = str(exc)
+        if "404" not in error_text and "Session not found" not in error_text:
+            raise
+        browser_session_id = _browser_session_id_for_agent_session(session_id)
+        if not browser_session_id or browser_session_id == session_id:
+            raise
+        return _browser_use_request("GET", f"/api/v3/browsers/{browser_session_id}/downloads?includeUrls=true")
 
 
 def stop_browser_use_session(session_id: str) -> BrowserUseRunResult:
