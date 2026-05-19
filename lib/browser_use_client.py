@@ -171,8 +171,23 @@ def _date_range_instruction(question: str, today: datetime) -> str:
 
 
 def _is_report_pickup_question(question: str) -> bool:
-    keywords = ["レポート一覧", "直近作成済み", "完了していれば", "保留中", "重複作成しない"]
+    keywords = [
+        "レポート一覧",
+        "既存レポート",
+        "作成済みレポート",
+        "直近作成済み",
+        "完了していれば",
+        "保留中",
+        "処理中",
+        "重複作成しない",
+        "ダウンロード未完了",
+        "該当行",
+    ]
     return any(keyword in question for keyword in keywords)
+
+
+def is_amazon_ads_report_pickup_question(question: str) -> bool:
+    return _is_report_pickup_question(question)
 
 
 def _report_workflow_instruction(question: str) -> str:
@@ -291,12 +306,27 @@ def _output_has_result(output: Any) -> bool:
     return _output_status(output).lower() in {"success", "partial", "blocked"}
 
 
+def _safe_download_path(path: Any) -> str | None:
+    if path is None:
+        return None
+    text = str(path).split("?", 1)[0]
+    if "://" in text:
+        text = text.rstrip("/").rsplit("/", 1)[-1]
+    return text or None
+
+
 def _safe_file_info(file_info: dict[str, Any]) -> dict[str, Any]:
     return {
-        "path": file_info.get("path"),
+        "path": _safe_download_path(file_info.get("path")),
         "size": file_info.get("size"),
         "lastModified": file_info.get("lastModified"),
     }
+
+
+def _safe_error_text(error: Any) -> str:
+    text = str(error)
+    text = re.sub(r"https?://[^\s\"'<>]+", "[URL omitted]", text)
+    return text[:500]
 
 
 def _metric_number(value: Any) -> float | None:
@@ -417,7 +447,7 @@ def _rows_from_grid(rows: list[list[Any]]) -> list[dict[str, Any]]:
     return records
 
 
-def _rows_from_csv_bytes(data: bytes) -> list[dict[str, Any]]:
+def _rows_from_csv_bytes(data: bytes, filename: str = "") -> list[dict[str, Any]]:
     text = None
     for encoding in ("utf-8-sig", "utf-8", "cp932", "shift_jis"):
         try:
@@ -427,7 +457,15 @@ def _rows_from_csv_bytes(data: bytes) -> list[dict[str, Any]]:
             continue
     if text is None:
         return []
-    rows = list(csv.reader(io.StringIO(text)))
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+    except csv.Error:
+        first_line = text.splitlines()[0] if text.splitlines() else ""
+        delimiter = "\t" if filename.lower().endswith(".tsv") or first_line.count("\t") > first_line.count(",") else ","
+        rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    else:
+        rows = list(csv.reader(io.StringIO(text), dialect))
     return _rows_from_grid(rows)
 
 
@@ -464,9 +502,9 @@ def _rows_from_report_bytes(data: bytes, filename: str) -> list[dict[str, Any]]:
         except zipfile.BadZipFile:
             return []
         return []
-    if lower_name.endswith(".xlsx"):
+    if lower_name.endswith((".xlsx", ".xlsm")):
         return _rows_from_xlsx_bytes(data)
-    return _rows_from_csv_bytes(data)
+    return _rows_from_csv_bytes(data, lower_name)
 
 
 def _find_report_value(row: dict[str, Any], metric: str) -> Any:
@@ -536,7 +574,7 @@ def _download_report_file(file_info: dict[str, Any]) -> tuple[dict[str, Any] | N
         with urlopen(Request(str(url), headers={"User-Agent": "amazon-ops-tool/1.0"}), timeout=90) as response:
             data = response.read()
     except Exception as exc:
-        return None, f"レポートファイルの取得に失敗しました: {exc}"
+        return None, f"レポートファイルの取得に失敗しました: {_safe_error_text(exc)}"
     rows = _rows_from_report_bytes(data, filename)
     if not rows:
         return None, "レポートファイル内の表ヘッダーを認識できませんでした。"
@@ -552,7 +590,7 @@ def _extract_downloaded_report_metrics(session_id: str) -> tuple[dict[str, Any] 
     try:
         downloads = _browser_use_downloads(session_id)
     except BrowserUseError as exc:
-        return None, [f"browser-useダウンロード一覧の取得に失敗しました: {exc}"]
+        return None, [f"browser-useダウンロード一覧の取得に失敗しました: {_safe_error_text(exc)}"]
 
     files = downloads.get("files") or []
     report_files = [
@@ -578,6 +616,75 @@ def _extract_downloaded_report_metrics(session_id: str) -> tuple[dict[str, Any] 
         "downloaded_files": [_safe_file_info(file_info) for file_info in files],
         "metrics": {},
     }, warnings
+
+
+def check_browser_use_downloads(session_id: str) -> BrowserUseRunResult:
+    cleaned_session_id = session_id.strip()
+    if not cleaned_session_id:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="確認するbrowser-useセッションIDを入力してください。",
+        )
+
+    parsed, warnings = _extract_downloaded_report_metrics(cleaned_session_id)
+    if parsed is None:
+        return BrowserUseRunResult(
+            attempted=True,
+            status="error",
+            summary="browser-useダウンロード一覧の確認に失敗しました。",
+            session_id=cleaned_session_id,
+            error="\n".join(warnings),
+            output={
+                "status": "error",
+                "summary": "browser-useダウンロード一覧の確認に失敗しました。",
+                "source": "browser_use_downloads",
+                "metrics": {},
+                "downloaded_files": [],
+                "notes": warnings,
+            },
+        )
+
+    metrics = parsed.get("metrics") or {}
+    downloaded_files = parsed.get("downloaded_files", [])
+    has_exact_metrics = any(metrics.get(key) is not None for key in ("ad_spend", "ad_sales", "clicks"))
+    if has_exact_metrics:
+        output = {
+            "status": "success",
+            "summary": "前回セッションの広告レポートファイルから実績値を取得しました。",
+            "source": "downloaded_ad_report",
+            "metrics": metrics,
+            "downloaded_report": parsed.get("file"),
+            "downloaded_files": downloaded_files,
+            "notes": warnings,
+        }
+        return BrowserUseRunResult(
+            attempted=True,
+            status="download_checked",
+            summary="前回セッションの広告レポートファイルから実績値を取得しました。",
+            session_id=cleaned_session_id,
+            output=output,
+            is_success=True,
+        )
+
+    blocked_by = "downloaded_report_parse_failed" if downloaded_files and warnings else "downloaded_report_not_found"
+    output = {
+        "status": "blocked",
+        "summary": "前回セッション内に解析可能な広告レポートファイルはまだ見つかりませんでした。",
+        "source": "browser_use_downloads",
+        "metrics": metrics,
+        "downloaded_files": downloaded_files,
+        "notes": warnings,
+        "blocked_by": blocked_by,
+    }
+    return BrowserUseRunResult(
+        attempted=True,
+        status="download_checked",
+        summary="前回セッション内に解析可能な広告レポートファイルはまだ見つかりませんでした。",
+        session_id=cleaned_session_id,
+        output=output,
+        is_success=False,
+    )
 
 
 def _merge_report_downloads(result: BrowserUseRunResult) -> BrowserUseRunResult:
@@ -792,6 +899,48 @@ Task:
 """
 
 
+def _build_amazon_ads_report_pickup_task(client: dict[str, Any], question: str) -> str:
+    now = datetime.now(ZoneInfo("Asia/Tokyo"))
+    today = now.date().isoformat()
+    date_range_instruction = _date_range_instruction(question, now)
+    company_name = client.get("name") or ""
+    shop_name = client.get("shop_name") or ""
+    marketplace = client.get("marketplace") or "Amazon.co.jp"
+    return f"""
+You are controlling an already-authenticated browser profile for Amazon Ads Japan.
+
+Safety rules:
+- This is a short pickup-only run. You may download an already-created Amazon Ads report, but you must not create a new report in this task.
+- Do not type, request, reveal, or store passwords, 2FA codes, API keys, recovery codes, signed URLs, or other secrets.
+- If Amazon asks for login, password, passkey, CAPTCHA, or 2FA, stop immediately and return status "needs_user_login".
+- Do not change bids, budgets, campaigns, listings, account settings, billing settings, or payments.
+- Do not click any button that confirms a purchase, subscription, payment, campaign launch, paid upgrade, billing change, budget change, or advertising change.
+- If a paid confirmation, budget confirmation, billing confirmation, or advertising-change confirmation appears, stop immediately and return status "needs_confirmation".
+
+Client:
+- Company name: {company_name}
+- Seller Central shop/store name to select: {shop_name}
+- Marketplace: {marketplace}
+- Today in Japan: {today}
+- User question: {question}
+- Date instruction: {date_range_instruction}
+
+Task:
+1. Open the Amazon Ads console directly: https://advertising.amazon.co.jp/
+2. Confirm that the active advertiser/store/account matches "{shop_name}" or visibly shows "{shop_name}". If a selector is visible and an exact or very close match exists, choose it.
+3. Navigate only to Sponsored ads reports / 広告レポート / レポート. Use the visible Reports navigation if a direct reports page is not already available.
+4. Open only the One-time / 1回限り reports tab. Do not open the report creation form.
+5. Refresh the browser page once, then reopen the One-time / 1回限り tab if needed.
+6. Check only the visible report rows and at most one short scroll within the report table. Do not run broad JavaScript/page-wide searches, do not keep scanning the whole page, and do not paginate through many pages.
+7. Find a row matching the requested period. For April 2026, match 2026-04-01 through 2026-04-30. Prefer Sponsored Products / スポンサープロダクト and campaign / キャンペーン scope.
+8. If the matching row is complete or shows a download button/icon/menu item, click the download control exactly once and then stop.
+9. If the matching row is visible but pending, processing, queued, or not ready, return status "blocked" with blocked_by "report_processing_not_ready".
+10. If no matching row is confidently visible after the single refresh and short table check, return status "blocked" with blocked_by "matching_report_not_found".
+11. Return status "partial" with source "downloaded_ad_report_pending_parse" if you clicked a download control. The app will parse the downloaded CSV/Excel after the session.
+12. Return only the requested structured result. Use null for metrics that are not visible in the browser; downloaded file parsing will fill exact values.
+"""
+
+
 def _build_seller_central_access_check_task(client: dict[str, Any], question: str) -> str:
     today = datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
     company_name = client.get("name") or ""
@@ -859,6 +1008,117 @@ def _result_from_session(session: dict[str, Any], summary: str | None = None) ->
         total_cost_usd=str(session.get("totalCostUsd")) if session.get("totalCostUsd") is not None else None,
         screenshot_url=session.get("screenshotUrl"),
     )
+
+
+def run_amazon_ads_report_pickup(client: dict[str, Any], question: str) -> BrowserUseRunResult:
+    config = get_browser_use_config()
+    if not config.api_key_configured:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="BROWSER_USE_API_KEYが未設定のため、広告レポート確認は実行していません。",
+        )
+
+    account_key = client.get("seller_account_key")
+    profile_id = seller_central_profile_id_for_account(account_key)
+    if not profile_id:
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="選択中クライアントに対応するbrowser-useプロフィールIDが未設定です。",
+        )
+    if not client.get("shop_name"):
+        return BrowserUseRunResult(
+            attempted=False,
+            status="unavailable",
+            summary="選択中クライアントのショップ名が未設定です。",
+        )
+
+    timeout_raw = _secret_or_env("BROWSER_USE_REPORT_PICKUP_TIMEOUT_SECONDS", "150") or "150"
+    try:
+        pickup_timeout_seconds = max(60, min(240, int(timeout_raw)))
+    except ValueError:
+        pickup_timeout_seconds = 150
+
+    payload: dict[str, Any] = {
+        "task": _build_amazon_ads_report_pickup_task(client, question),
+        "model": _normalize_v3_model(config.default_model),
+        "keepAlive": False,
+        "maxCostUsd": _secret_or_env("BROWSER_USE_REPORT_PICKUP_MAX_COST_USD", "0.45") or "0.45",
+        "profileId": profile_id,
+        "proxyCountryCode": config.proxy_country_code,
+        "outputSchema": SELLER_CENTRAL_OUTPUT_SCHEMA,
+        "enableRecording": False,
+        "skills": True,
+        "agentmail": False,
+        "codeMode": False,
+        "cacheScript": False,
+        "autoHeal": True,
+    }
+
+    try:
+        session = _browser_use_request("POST", "/api/v3/sessions", payload)
+        session_id = session.get("id")
+        if not session_id:
+            return BrowserUseRunResult(
+                attempted=True,
+                status="failed",
+                summary="browser-useセッションIDを取得できませんでした。",
+                output=session,
+            )
+
+        final_statuses = {"stopped", "timed_out", "error"}
+        deadline = time.monotonic() + pickup_timeout_seconds
+        while str(session.get("status") or "") not in final_statuses and time.monotonic() < deadline:
+            time.sleep(4)
+            session = _browser_use_request("GET", f"/api/v3/sessions/{session_id}")
+
+        if str(session.get("status") or "") not in final_statuses:
+            latest = get_browser_use_session(session_id)
+            stop_result = stop_browser_use_session(session_id)
+            if stop_result.status != "error":
+                output = stop_result.output or latest.output
+                output_has_result = _output_has_result(output)
+                output_success = _output_is_success(output)
+                result = BrowserUseRunResult(
+                    attempted=True,
+                    status=stop_result.status,
+                    summary=(
+                        f"{_output_summary(output)} セッションは短時間確認の上限で自動停止しました。"
+                        if output_has_result
+                        else "短時間のレポート一覧確認が完了しなかったため、コスト抑制のためbrowser-useセッションを自動停止しました。"
+                    ),
+                    session_id=stop_result.session_id or session_id,
+                    live_url=stop_result.live_url or latest.live_url or session.get("liveUrl"),
+                    last_step_summary=stop_result.last_step_summary or latest.last_step_summary or session.get("lastStepSummary"),
+                    output=output,
+                    is_success=True if output_success else stop_result.is_success,
+                    total_cost_usd=stop_result.total_cost_usd or latest.total_cost_usd,
+                    screenshot_url=stop_result.screenshot_url or latest.screenshot_url,
+                )
+                return _merge_report_downloads(result)
+            result = BrowserUseRunResult(
+                attempted=True,
+                status=str(session.get("status") or "running"),
+                summary="browser-useはまだ実行中です。自動停止も失敗したため、ライブ画面から手動停止してください。",
+                session_id=session_id,
+                live_url=session.get("liveUrl"),
+                last_step_summary=session.get("lastStepSummary"),
+                output=session.get("output"),
+                is_success=session.get("isTaskSuccessful"),
+                total_cost_usd=str(session.get("totalCostUsd")) if session.get("totalCostUsd") is not None else None,
+                screenshot_url=session.get("screenshotUrl"),
+                error=stop_result.error,
+            )
+            return _merge_report_downloads(result)
+        return _merge_report_downloads(_result_from_session(session))
+    except BrowserUseError as exc:
+        return BrowserUseRunResult(
+            attempted=True,
+            status="error",
+            summary="browser-use API呼び出しに失敗しました。",
+            error=str(exc),
+        )
 
 
 def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> BrowserUseRunResult:

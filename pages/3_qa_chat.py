@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 
 import streamlit as st
 
 from lib.browser_use_client import (
     BrowserUseRunResult,
+    check_browser_use_downloads,
     get_browser_use_session,
     get_browser_use_config,
+    is_amazon_ads_report_pickup_question,
+    run_amazon_ads_report_pickup,
     run_seller_central_access_check,
     run_seller_central_metrics_fetch,
     stop_browser_use_session,
@@ -18,6 +22,8 @@ from lib.prompts import INTERNAL_KNOWLEDGE, QA_SYSTEM_PROMPT
 from lib.seller_central_mapping import seller_account_label
 from lib.ui import require_workspace
 
+
+SESSION_ID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 client = require_workspace("Q&Aチャット")
 
@@ -67,6 +73,28 @@ with st.expander("browser-useセッション状態を確認"):
                 st.link_button("最終スクリーンショットを開く", inspect_result.screenshot_url)
                 st.image(inspect_result.screenshot_url, caption="browser-useの最終画面")
 
+with st.expander("前回セッションのダウンロードだけ確認"):
+    st.caption("ブラウザ操作を再実行せず、browser-useのダウンロード一覧だけを確認します。署名付きダウンロードURLは表示しません。")
+    download_session_id = st.text_input(
+        "ダウンロードを確認するセッションID",
+        key="browser_use_download_session_id",
+        placeholder="例: live.browser-use.com/session/ の末尾にあるUUID",
+    )
+    if st.button("このセッションのダウンロードを確認", key="inspect_browser_use_downloads"):
+        download_result = check_browser_use_downloads(download_session_id)
+        output = download_result.output if isinstance(download_result.output, dict) else {}
+        output_status = output.get("status")
+        if download_result.status == "error":
+            st.error(download_result.summary)
+            if download_result.error:
+                st.caption(download_result.error)
+        elif output_status == "success":
+            st.success(download_result.summary)
+        else:
+            st.warning(download_result.summary)
+        if output:
+            st.json(output)
+
 messages = get_chat_messages(client["id"], limit=30)
 for message in messages:
     with st.chat_message(message["role"]):
@@ -76,18 +104,25 @@ for message in messages:
 
 
 def needs_seller_data(question: str) -> bool:
-    keywords = ["売上", "広告", "ACOS", "CVR", "CTR", "インプレッション", "クリック", "期間", "先週", "今月", "先月"]
+    keywords = ["売上", "広告", "ACOS", "CVR", "CTR", "インプレッション", "クリック", "期間", "先週", "今月", "先月", "レポート", "ダウンロード"]
     return any(keyword.lower() in question.lower() for keyword in keywords)
 
 
 def needs_access_check(question: str) -> bool:
     text = question.lower()
+    if is_amazon_ads_report_pickup_question(question):
+        return False
     access_words = ["到達", "開ける", "開け", "画面", "ログイン", "2fa", "確認"]
     metric_words = ["広告費", "売上", "acos", "クリック", "cvr", "ctr", "インプレッション", "roas", "cpc"]
     access_only_words = ["だけ確認", "到達できるか", "到達確認", "数値取得はしない", "取得はしない", "取得しない"]
     if any(word in text for word in access_only_words):
         return True
     return any(word in text for word in access_words) and not any(word in text for word in metric_words)
+
+
+def browser_use_session_id_from_text(text: str) -> str | None:
+    match = SESSION_ID_PATTERN.search(text)
+    return match.group(0) if match else None
 
 
 def profile_available_for_account(account_key: str | None) -> bool:
@@ -151,9 +186,9 @@ browser-useプロフィール: {browser_profile_status}
 def fallback_answer(question: str) -> str:
     if needs_seller_data(question):
         return (
-            "この内容はSeller Centralの実績確認が必要です。V1の現段階では自動取得をまだ接続していないため、"
-            "対象期間、売上、広告費、ACOS、クリック数、CVRが分かるCSVを確認できると分析できます。"
-            "まずは期間と見たい指標を指定してください。"
+            "この内容はSeller Centralの実績確認が必要です。"
+            "自動取得が未実行または未完了の場合は、対象期間と見たい指標を指定してから、"
+            "Seller Central実データ取得をオンにして進めます。"
         )
     return (
         "履歴に残しました。APIキー設定後はClaudeが文脈を踏まえて回答します。"
@@ -229,7 +264,12 @@ if question:
     fetch_result = None
     if needs_seller_data(question) and seller_fetch_enabled:
         with st.spinner("browser-useでSeller Centralを確認しています。ログインや2FAが必要になった場合は取得を止めます。"):
-            if needs_access_check(question):
+            session_id = browser_use_session_id_from_text(question)
+            if session_id and "ダウンロード" in question:
+                fetch_result = check_browser_use_downloads(session_id)
+            elif is_amazon_ads_report_pickup_question(question):
+                fetch_result = run_amazon_ads_report_pickup(client, question)
+            elif needs_access_check(question):
                 fetch_result = run_seller_central_access_check(client, question)
             else:
                 fetch_result = run_seller_central_metrics_fetch(client, question)
