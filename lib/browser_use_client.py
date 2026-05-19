@@ -755,12 +755,12 @@ Task:
 2. Confirm that the active advertiser/store/account matches "{shop_name}" or visibly shows "{shop_name}". If a selector is visible and an exact or very close match exists, choose it.
 3. Navigate to Sponsored ads reports / 広告レポート / レポート. Use direct report pages if available from the UI; otherwise use the visible Reports navigation.
 4. Before creating anything new, inspect the reports list for a recently created report that matches the requested date range and campaign/Sponsored Products scope. If it is complete or has a download icon/button, download it immediately.
-5. If the matching report is visible but still processing, wait 45 seconds, refresh or reopen the reports list, and check again. Repeat this up to 4 times. Do not create a duplicate while a matching report is still processing.
+5. If the matching report is visible but still processing, wait 45 seconds, then refresh the browser page using the browser reload action. After reload, reopen the One-time / 1回限り reports tab if needed and re-check the matching row. Repeat this refresh-and-check cycle up to 4 times. Do not create a duplicate while a matching report is still processing.
 6. If no matching report exists, create a downloadable campaign performance report for the requested date range. The report creation itself is approved. Do not stop merely because a "Create report" / "レポートを作成" button is shown.
 7. Prefer an all-sponsored-ads campaign report if the UI offers it. If the UI requires separate ad products, create Sponsored Products campaign report first. Include report_scope in the result so we know whether it is all ads or Sponsored Products only.
 8. Use the date instruction above. For April 2026, use 2026-04-01 through 2026-04-30. Do not search the campaign manager for "今日".
 9. Choose CSV or Excel/XLSX if format is selectable. Prefer summary/campaign level. Include columns for spend/cost, sales, ACOS, clicks, impressions, CPC, and CTR when selectable.
-10. After creating a report, return to the reports list and wait for it to finish. Refresh or reopen the list every 45 seconds up to 4 times. Download the report as soon as a download button/icon appears.
+10. After creating a report, return to the reports list and wait for it to finish. Every 45 seconds, refresh the browser page, reopen the One-time / 1回限り tab if needed, and re-check the matching row. Repeat up to 4 times. Download the report as soon as a download button/icon appears.
 11. If the report is still processing after those checks, return status "blocked" with blocked_by "report_processing_not_ready", current_url, visible_screen, and a note that the report was created but not ready for download yet.
 12. If the report cannot be downloaded for another reason, return status "blocked" or "partial" with current_url, visible_screen, blocked_by, and whether report creation was attempted.
 13. If a report is downloaded, return status "partial" with source "downloaded_ad_report_pending_parse"; the app will parse the downloaded CSV/Excel after the session.
@@ -889,7 +889,7 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
             )
 
         final_statuses = {"stopped", "timed_out", "error"}
-        deadline = time.monotonic() + max(config.poll_timeout_seconds, 360)
+        deadline = time.monotonic() + max(config.poll_timeout_seconds, 420)
         while str(session.get("status") or "") not in final_statuses and time.monotonic() < deadline:
             time.sleep(4)
             session = _browser_use_request("GET", f"/api/v3/sessions/{session_id}")
