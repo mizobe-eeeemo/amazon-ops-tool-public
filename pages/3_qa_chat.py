@@ -218,6 +218,63 @@ def fallback_answer(question: str) -> str:
     )
 
 
+def yen(value: object) -> str:
+    try:
+        return f"{float(value):,.0f}円"
+    except (TypeError, ValueError):
+        return "未取得"
+
+
+def number_text(value: object) -> str:
+    try:
+        return f"{float(value):,.0f}"
+    except (TypeError, ValueError):
+        return "未取得"
+
+
+def percent_text(value: object) -> str:
+    try:
+        return f"{float(value):.2f}%"
+    except (TypeError, ValueError):
+        return "未取得"
+
+
+def automated_fetch_answer(fetch_result: BrowserUseRunResult) -> str:
+    output = fetch_result.output if isinstance(fetch_result.output, dict) else {}
+    metrics = output.get("metrics") if isinstance(output.get("metrics"), dict) else {}
+    source = output.get("source")
+    output_status = output.get("status")
+
+    if source == "downloaded_ad_report" or output_status == "success":
+        return (
+            "広告レポート由来の数値を取得できました。\n\n"
+            "| 指標 | 取得結果 |\n"
+            "|---|---:|\n"
+            f"| 広告費 | {yen(metrics.get('ad_spend'))} |\n"
+            f"| 広告売上 | {yen(metrics.get('ad_sales'))} |\n"
+            f"| ACOS | {percent_text(metrics.get('acos'))} |\n"
+            f"| クリック数 | {number_text(metrics.get('clicks'))} |\n\n"
+            "この値はダウンロード済み広告レポートの解析結果として扱えます。"
+        )
+
+    blocked_by = output.get("blocked_by")
+    if blocked_by == "report_processing_not_ready":
+        return (
+            "該当レポートはまだ保留中または処理中でした。ブラウザ更新1回後も未完了のため、ここで停止しています。\n\n"
+            "手動取得には切り替えません。時間を置いて、同じ既存レポート行のダウンロードアイコンだけを再確認します。"
+        )
+    if blocked_by == "matching_report_not_found":
+        return (
+            "短時間確認では、該当するキャンペーンレポート行を確定できませんでした。\n\n"
+            "手動取得には切り替えません。次は、表示中のレポート一覧で「スポンサープロダクト広告 キャンペーン レポート」の行と下向き矢印だけに対象を絞って再実行します。"
+        )
+
+    return (
+        "今回は広告レポートのダウンロード完了までは確認できませんでした。\n\n"
+        "手動取得には切り替えません。見えているレポート一覧にはダウンロードアイコンがあるため、次は既存のキャンペーンレポート行の下向き矢印を1回押す専用タスクとして再実行します。"
+    )
+
+
 def fetch_status_label(fetch_result: BrowserUseRunResult | None) -> str:
     if fetch_result is None:
         return "未実行（実データ取得スイッチがオフ）"
@@ -295,13 +352,18 @@ if question:
                 fetch_result = run_seller_central_access_check(client, question)
             else:
                 fetch_result = run_seller_central_metrics_fetch(client, question)
-    prompt = build_prompt(question, messages, fetch_result)
-    result = complete(prompt, system=QA_SYSTEM_PROMPT, max_tokens=1400)
-    answer = result.text or fallback_answer(question)
+    if needs_seller_data(question) and fetch_result is not None:
+        answer = automated_fetch_answer(fetch_result)
+        result_used_api = False
+    else:
+        prompt = build_prompt(question, messages, fetch_result)
+        result = complete(prompt, system=QA_SYSTEM_PROMPT, max_tokens=1400)
+        answer = result.text or fallback_answer(question)
+        result_used_api = result.used_api
     if needs_seller_data(question):
         if fetch_result and fetch_result.output:
             answer = f"{answer}\n\n---\n\n### browser-use取得結果\n\n```json\n{json.dumps(fetch_result.output, ensure_ascii=False, indent=2)}\n```"
         answer = f"{seller_central_check_block(fetch_result)}\n\n---\n\n{answer}"
-    source_context = source_context_for(result.used_api, fetch_result)
+    source_context = source_context_for(result_used_api, fetch_result)
     add_chat_message(client["id"], "assistant", answer, source_context=source_context)
     st.rerun()

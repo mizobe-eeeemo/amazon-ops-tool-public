@@ -916,6 +916,7 @@ Safety rules:
 - Do not change bids, budgets, campaigns, listings, account settings, billing settings, or payments.
 - Do not click any button that confirms a purchase, subscription, payment, campaign launch, paid upgrade, billing change, budget change, or advertising change.
 - If a paid confirmation, budget confirmation, billing confirmation, or advertising-change confirmation appears, stop immediately and return status "needs_confirmation".
+- Do not run JavaScript, page-wide scripts, table extraction scripts, console commands, or broad DOM scans. Use visible UI navigation and clicks only.
 
 Client:
 - Company name: {company_name}
@@ -930,12 +931,12 @@ Task:
 2. Confirm that the active advertiser/store/account matches "{shop_name}" or visibly shows "{shop_name}". If a selector is visible and an exact or very close match exists, choose it.
 3. Navigate only to Sponsored ads reports / 広告レポート / レポート. Use the visible Reports navigation if a direct reports page is not already available.
 4. Open only the One-time / 1回限り reports tab. Do not open the report creation form.
-5. Refresh the browser page once, then reopen the One-time / 1回限り tab if needed.
-6. Check only the visible report rows and at most one short scroll within the report table. Do not run broad JavaScript/page-wide searches, do not keep scanning the whole page, and do not paginate through many pages.
-7. Find a row matching the requested period. For April 2026, match 2026-04-01 through 2026-04-30. Prefer Sponsored Products / スポンサープロダクト and campaign / キャンペーン scope.
-8. If the matching row is complete or shows a download button/icon/menu item, click the download control exactly once and then stop.
-9. If the matching row is visible but pending, processing, queued, or not ready, return status "blocked" with blocked_by "report_processing_not_ready".
-10. If no matching row is confidently visible after the single refresh and short table check, return status "blocked" with blocked_by "matching_report_not_found".
+5. The report table may already be visible. First check only the visible rows. Do not use the search box unless the table is blank.
+6. Prefer the row whose title contains "スポンサープロダクト広告 キャンペーン レポート" and whose report category is "スポンサープロダクト広告" and report type is "キャンペーン".
+7. If that campaign row is not visible, do one short scroll inside the report table and check the newly visible rows only.
+8. If the matching row is visible and has a down-arrow download icon in the same row, click that down-arrow download icon exactly once and then stop. Do not inspect hidden cells first.
+9. If the matching row is visible but pending, processing, queued, or not ready, refresh the browser page once, reopen the One-time / 1回限り tab if needed, re-check that same row once, then return status "blocked" with blocked_by "report_processing_not_ready" if still not ready.
+10. If no campaign row is confidently visible after the single short table check, return status "blocked" with blocked_by "matching_report_not_found".
 11. Return status "partial" with source "downloaded_ad_report_pending_parse" if you clicked a download control. The app will parse the downloaded CSV/Excel after the session.
 12. Return only the requested structured result. Use null for metrics that are not visible in the browser; downloaded file parsing will fill exact values.
 """
@@ -1049,11 +1050,11 @@ def run_amazon_ads_report_pickup(client: dict[str, Any], question: str) -> Brows
         "proxyCountryCode": config.proxy_country_code,
         "outputSchema": SELLER_CENTRAL_OUTPUT_SCHEMA,
         "enableRecording": False,
-        "skills": True,
+        "skills": False,
         "agentmail": False,
         "codeMode": False,
         "cacheScript": False,
-        "autoHeal": True,
+        "autoHeal": False,
     }
 
     try:
