@@ -181,7 +181,9 @@ def _report_workflow_instruction(question: str) -> str:
             "Report pickup mode: a matching report may already exist from a previous run. Do not create a duplicate report. "
             "Open the reports list, use browser reload once, reopen the One-time / 1回限り tab if needed, and find the matching report. "
             "If it is ready, download it. If it is still pending after one more reload check, return status blocked with blocked_by "
-            '"report_processing_not_ready". Keep this run short and focused on downloading an existing report.'
+            '"report_processing_not_ready". If you cannot confidently identify the matching row after one reload, return status blocked '
+            'with blocked_by "matching_report_not_found". Do not run broad JavaScript/page-wide searches or keep scanning the whole page. '
+            "Keep this run focused on downloading an existing report."
         )
     return (
         "Report creation mode: create the requested report if no matching report exists, then check the reports list. "
@@ -785,7 +787,8 @@ Task:
 11. If the report is still processing after those checks, return status "blocked" with blocked_by "report_processing_not_ready", current_url, visible_screen, and a note that the report was created but not ready for download yet.
 12. If the report cannot be downloaded for another reason, return status "blocked" or "partial" with current_url, visible_screen, blocked_by, and whether report creation was attempted.
 13. If a report is downloaded, return status "partial" with source "downloaded_ad_report_pending_parse"; the app will parse the downloaded CSV/Excel after the session.
-14. Return only the requested structured result. Use null for metrics that are not visible in the browser; downloaded file parsing will fill exact values.
+14. In pickup mode, always end with one of these results: downloaded report, blocked because report is still processing, or blocked because matching report was not found. Do not continue exploring beyond that.
+15. Return only the requested structured result. Use null for metrics that are not visible in the browser; downloaded file parsing will fill exact values.
 """
 
 
@@ -887,7 +890,7 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
         "model": _normalize_v3_model(config.default_model),
         "keepAlive": False,
         "maxCostUsd": (
-            _secret_or_env("BROWSER_USE_REPORT_PICKUP_MAX_COST_USD", "0.45")
+            _secret_or_env("BROWSER_USE_REPORT_PICKUP_MAX_COST_USD", "0.60")
             if _is_report_pickup_question(question)
             else _secret_or_env("BROWSER_USE_REPORT_MAX_COST_USD", "0.85")
         )
@@ -916,7 +919,7 @@ def run_seller_central_metrics_fetch(client: dict[str, Any], question: str) -> B
 
         final_statuses = {"stopped", "timed_out", "error"}
         deadline = time.monotonic() + (
-            max(config.poll_timeout_seconds, 180)
+            max(config.poll_timeout_seconds, 300)
             if _is_report_pickup_question(question)
             else max(config.poll_timeout_seconds, 420)
         )
